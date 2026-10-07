@@ -1368,7 +1368,7 @@ const rowNumber =
   ${jsonForHtml(result.rowNumber)};
 
 const sepaAmount =
-  ${jsonForHtml(String(betrag || "").replace(",", "."))};
+  ${jsonForHtml(String(betrag || "").replace(/[^\d,.-]/g, "").replace(",", "."))};
 
 const payees =
   ${jsonForHtml(payeeData)};
@@ -1390,18 +1390,22 @@ function buildSepaPayload() {
 
   if (!name || !iban || !purpose) return "";
 
-  const amount = String(sepaAmount || "").replace(",", ".").trim();
+  const value = Number(String(sepaAmount || "").replace(",", ".").trim());
 
+  // Aufbau nach EPC-Standard (GiroCode). Der Verwendungszweck
+  // gehört in Zeile 11, die Zeilen 9 und 10 bleiben leer.
   return [
     "BCD",
     "002",
     "1",
     "SCT",
-    bic,
-    name,
-    iban,
-    amount ? "EUR" + amount : "EUR0.00",
-    purpose
+    bic.toUpperCase(),
+    name.substring(0, 70),
+    iban.toUpperCase(),
+    value > 0 ? "EUR" + value.toFixed(2) : "",
+    "",
+    "",
+    purpose.substring(0, 140)
   ].join("\\n");
 }
 
@@ -4261,12 +4265,7 @@ ${commonCss()}
 <script>
 const sepaPaymentPayload =
   ${jsonForHtml(
-    "BCD\n002\n1\nSCT\n" +
-    String(bic || "") + "\n" +
-    String(recipient || "") + "\n" +
-    String(iban || "").replace(/\s+/g, "") + "\n" +
-    "EUR" + String(betrag || "").replace(",", ".") + "\n" +
-    String(paymentPurpose || "")
+    buildSepaQrPayload(recipient, iban, bic, betrag, paymentPurpose)
   )};
 
 function renderPaymentQr() {
@@ -4277,7 +4276,8 @@ function renderPaymentQr() {
 
   if (!payload) {
     box.innerHTML =
-      "<div class='small'>Keine vollständigen SEPA-Daten vorhanden.</div>";
+      "<div class='warning'>Kein QR-Code möglich: Zahlungsempfänger, " +
+      "IBAN oder Verwendungszweck fehlen. Bitte beim 1. Kassierer nachfragen.</div>";
     return;
   }
 
@@ -4511,8 +4511,13 @@ SEPA-Überweisung
 
 <p>
 Bitte die Überweisung anhand der oben angezeigten
-Zahlungsdaten durchführen.
+Zahlungsdaten durchführen oder den QR-Code mit der
+Banking-App scannen.
 </p>
+
+<div id="sepaQrCodePayment" style="text-align:center;padding:10px">
+  <div class="small">SEPA-QR-Code wird geladen...</div>
+</div>
 
 </div>
 
@@ -4578,6 +4583,50 @@ ${htmlEscape(ueberwiesenAm)}
 </html>
 
 `;
+
+}
+
+
+/************************************************************
+ * SEPA-QR-CODE (EPC/GiroCode)
+ *
+ * Liefert "" wenn Pflichtangaben fehlen.
+ ************************************************************/
+
+
+function buildSepaQrPayload(recipient, iban, bic, amount, purpose) {
+
+  const name = String(recipient || "").trim();
+  const cleanIban = String(iban || "").replace(/\s+/g, "").toUpperCase();
+  const cleanBic = String(bic || "").replace(/\s+/g, "").toUpperCase();
+  const text = String(purpose || "").trim();
+
+  if (!name || !cleanIban || !text) {
+    return "";
+  }
+
+  // Betrag kann als Zahl (12.5) oder Text ("12,50 €") in der Tabelle stehen.
+  let value =
+    typeof amount === "number"
+      ? amount
+      : Number(String(amount || "").replace(/[^\d,.-]/g, "").replace(",", "."));
+
+  const amountPart =
+    value > 0 ? "EUR" + value.toFixed(2) : "";
+
+  return [
+    "BCD",
+    "002",
+    "1",
+    "SCT",
+    cleanBic,
+    name.substring(0, 70),
+    cleanIban,
+    amountPart,
+    "",
+    "",
+    text.substring(0, 140)
+  ].join("\n");
 
 }
 
