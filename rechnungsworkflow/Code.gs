@@ -570,25 +570,6 @@ function onFormSubmit(e) {
   }
 
 
-  sheet
-    .getRange(
-      row,
-      COL.BELEG_ID
-    )
-    .setValue(
-      belegId
-    );
-
-
-  sheet
-    .getRange(
-      row,
-      COL.STATUS
-    )
-    .setValue(
-      "Neu"
-    );
-
   if (!sheet.getRange(1, COL.INTERNE_ID).getValue()) sheet.getRange(1, COL.INTERNE_ID).setValue("Interne Beleg-ID");
   const internalId = getOrCreateInternalId(row);
 
@@ -1338,7 +1319,7 @@ function createDetailPage(
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
 
-<title>Belegprüfung KGV Neuenhof – DIAGNOSE 2026-09-29</title>
+<title>Belegprüfung KGV Neuenhof</title>
 
 <style>
 
@@ -1381,7 +1362,7 @@ ${commonCss()}
 <script>
 
 const belegId =
-  ${jsonForHtml(String(belegId))};
+  ${jsonForHtml(String(result.values[COL.BELEG_ID - 1] || belegId))};
 
 const rowNumber =
   ${jsonForHtml(result.rowNumber)};
@@ -1403,8 +1384,8 @@ function buildSepaPayload() {
   if (!recipient || !ibanEl || !purposeEl) return "";
 
   const name = recipient.value.trim();
-  const iban = ibanEl.value.replace(/\s+/g, "").trim();
-  const bic = bicEl ? bicEl.value.replace(/\s+/g, "").trim() : "";
+  const iban = ibanEl.value.replace(/\\s+/g, "").trim();
+  const bic = bicEl ? bicEl.value.replace(/\\s+/g, "").trim() : "";
   const purpose = purposeEl.value.trim();
 
   if (!name || !iban || !purpose) return "";
@@ -1421,7 +1402,7 @@ function buildSepaPayload() {
     iban,
     amount ? "EUR" + amount : "EUR0.00",
     purpose
-  ].join("\n");
+  ].join("\\n");
 }
 
 function renderSepaQrCode() {
@@ -1443,68 +1424,6 @@ function renderSepaQrCode() {
     encodeURIComponent(payload) +
     "&size=320'>" +
     "<div class='small' style='margin-top:8px'>SEPA-Überweisungsdaten</div>";
-}
-
-
-function diagnoseButton() {
-  const button = document.getElementById("diagnoseButton");
-  const result = document.getElementById("diagnoseResult");
-
-  if (button) {
-    button.disabled = true;
-    button.innerText = "Teste Verbindung...";
-  }
-
-  if (result) {
-    result.style.display = "block";
-    result.innerHTML = "⏳ Test läuft...";
-  }
-
-  if (typeof google === "undefined" || !google.script || !google.script.run) {
-    if (result) {
-      result.innerHTML =
-        "❌ google.script.run ist im Browser nicht verfügbar.";
-    }
-    if (button) {
-      button.disabled = false;
-      button.innerText = "🔧 Verbindung testen";
-    }
-    return;
-  }
-
-  google.script.run
-    .withSuccessHandler(function(data) {
-      if (result) {
-        if (data && data.ok) {
-          result.innerHTML =
-            "✅ " + data.message +
-            "<br>Schlüssel: " + data.identifier +
-            "<br>Zeile: " + data.row +
-            "<br>Beleg-ID: " + data.belegId;
-        } else {
-          result.innerHTML =
-            "⚠️ " + ((data && data.message) || "Unbekannte Antwort.");
-        }
-      }
-
-      if (button) {
-        button.disabled = false;
-        button.innerText = "🔧 Verbindung erneut testen";
-      }
-    })
-    .withFailureHandler(function(error) {
-      if (result) {
-        result.innerHTML =
-          "❌ Serverfehler: " +
-          (error && error.message ? error.message : String(error));
-      }
-
-      if (button) {
-        button.disabled = false;
-        button.innerText = "🔧 Verbindung erneut testen";
-      }
-    })
-    .diagnoseConnection(belegId);
 }
 
 
@@ -1559,6 +1478,10 @@ function originalbelegVorhanden() {
         ).innerHTML =
           "✅ " + result;
 
+        document.getElementById(
+          "originalConfirmed"
+        ).checked = true;
+
       }
     )
 
@@ -1578,16 +1501,16 @@ function originalbelegVorhanden() {
       }
     )
 
-    .originalbelegVorhanden(
-      belegId
+    .originalbelegVorhandenByRow(
+      rowNumber
     );
 
 }
 
 
-function savePaymentData() {
+function collectPaymentData() {
 
-  const data = {
+  return {
 
     zahlungsempfaenger:
       document.getElementById(
@@ -1620,6 +1543,14 @@ function savePaymentData() {
       ).checked
 
   };
+
+}
+
+
+function savePaymentData() {
+
+  const data =
+    collectPaymentData();
 
 
   const button =
@@ -1784,7 +1715,11 @@ function sendToSecondCashier() {
     )
 
     .sendToSecondCashierByRow(
-      rowNumber
+      rowNumber,
+      Object.assign(
+        collectPaymentData(),
+        {originalConfirmed: true}
+      )
     );
 
 }
@@ -1875,14 +1810,17 @@ function escapeHtml(
 }
 
 
-["zahlungsempfaenger","iban","bic","zahlungszweck"].forEach(function(id) {
-  const field = document.getElementById(id);
-  if (field) {
-    field.addEventListener("input", renderSepaQrCode);
-  }
+// Das Skript steht im <head>. Die Eingabefelder existieren erst nach dem
+// Laden der Seite, daher die Listener erst dann registrieren.
+window.addEventListener("load", function() {
+  ["zahlungsempfaenger","iban","bic","zahlungszweck"].forEach(function(id) {
+    const field = document.getElementById(id);
+    if (field) {
+      field.addEventListener("input", renderSepaQrCode);
+    }
+  });
+  renderSepaQrCode();
 });
-
-window.addEventListener("load", renderSepaQrCode);
 
 document.addEventListener(
   "click",
@@ -2127,6 +2065,11 @@ function chooseAction(
   action
 ) {
 
+  if (action === "Zahlung an 2. Kassierer") {
+    sendToSecondCashier();
+    return;
+  }
+
   const buttons =
     document.querySelectorAll(
       ".decision-button"
@@ -2182,12 +2125,6 @@ function chooseAction(
 }
 
 
-document.addEventListener("DOMContentLoaded", function() {
-  const btn = document.getElementById("diagnoseButton");
-  if (btn) {
-    btn.addEventListener("click", diagnoseButton);
-  }
-});
 
 </script>
 
@@ -2201,88 +2138,8 @@ document.addEventListener("DOMContentLoaded", function() {
 Belegprüfung KGV Neuenhof
 </h1>
 
-<div style="
-  margin:15px 0;
-  padding:15px;
-  border:2px solid #d9a400;
-  border-radius:10px;
-  background:#fff8db;
-">
-  <strong>Diagnoseversion 3 – 2026-09-29</strong><br>
-  <span style="font-size:13px;">
-    Dieser erste Test benutzt weder Apps Script noch google.script.run.
-  </span>
-
-  <button
-    id="simpleTestButton"
-    class="button"
-    style="background:#d9a400;color:#111;"
-    onclick="
-      this.innerText='✅ JAVASCRIPT-KLICK FUNKTIONIERT';
-      this.style.background='#188038';
-      document.getElementById('simpleTestResult').innerText='Der Browser verarbeitet den Klick.';
-    "
-  >
-    🧪 Einfachen Klick testen
-  </button>
-
-  <div
-    id="simpleTestResult"
-    style="
-      margin-top:10px;
-      padding:10px;
-      background:white;
-      border-radius:6px;
-    "
-  >
-    Noch nicht getestet.
-  </div>
-
-  <button
-    id="diagnoseButton"
-    class="button"
-    style="background:#666;color:white;"
-    onclick="
-      this.disabled=true;
-      this.innerText='⏳ Server wird getestet...';
-      google.script.run
-        .withSuccessHandler(function(data){
-          document.getElementById('diagnoseResult').style.display='block';
-          document.getElementById('diagnoseResult').innerHTML =
-            data && data.ok
-              ? '✅ SERVER ERREICHBAR – Beleg-ID: ' + data.belegId + ' – Zeile: ' + data.row
-              : '⚠️ SERVER ERREICHBAR, ABER: ' + ((data && data.message) || 'unbekannte Antwort');
-          this.disabled=false;
-          this.innerText='🔧 Verbindung erneut testen';
-        }.bind(this))
-        .withFailureHandler(function(error){
-          document.getElementById('diagnoseResult').style.display='block';
-          document.getElementById('diagnoseResult').innerHTML =
-            '❌ SERVERFEHLER: ' + (error && error.message ? error.message : String(error));
-          this.disabled=false;
-          this.innerText='🔧 Verbindung erneut testen';
-        }.bind(this))
-        .diagnoseConnection(belegId);
-    "
-  >
-    🔧 Danach Verbindung testen
-  </button>
-
-  <div
-    id="diagnoseResult"
-    style="
-      display:none;
-      margin-top:10px;
-      padding:10px;
-      background:white;
-      border-radius:6px;
-    "
-  ></div>
-</div>
-
-
 <div class="beleg-id">
-Beleg ${htmlEscape(belegId)}
+Beleg ${htmlEscape(result.values[COL.BELEG_ID - 1] || belegId)}
 </div>
 
 
@@ -2833,12 +2690,34 @@ function getBelegIdFromRow(rowNumber) {
   return id;
 }
 
+function originalbelegVorhandenByRow(rowNumber) {
+  return originalbelegVorhanden(getBelegIdFromRow(rowNumber));
+}
+
 function savePaymentDataByRow(rowNumber, data) {
   return savePaymentData(getBelegIdFromRow(rowNumber), data || {});
 }
 
-function sendToSecondCashierByRow(rowNumber) {
-  return sendToSecondCashier(getBelegIdFromRow(rowNumber));
+function sendToSecondCashierByRow(rowNumber, data) {
+  const belegId = getBelegIdFromRow(rowNumber);
+
+  // Die im Formular eingetragenen Zahlungsdaten zuerst speichern.
+  // Sonst prüft sendToSecondCashier() die alten Werte aus der Tabelle
+  // und meldet "kein Zahlungsempfänger", obwohl er im Formular steht.
+  if (data) {
+    savePaymentData(belegId, data);
+
+    // Häkchen "Originalbeleg ist vorhanden" ebenfalls übernehmen.
+    if (data.originalConfirmed) {
+      const sheet = getSheet();
+      const n = Number(rowNumber);
+      if (sheet.getRange(n, COL.ORIGINALBELEG).getValue() !== "Ja") {
+        originalbelegVorhanden(belegId);
+      }
+    }
+  }
+
+  return sendToSecondCashier(belegId);
 }
 
 function entscheidungTreffenByRow(rowNumber, action) {
@@ -3851,7 +3730,7 @@ ${commonCss()}
 <script>
 
 const belegId =
-  ${jsonForHtml(String(belegId))};
+  ${jsonForHtml(String(result.values[COL.BELEG_ID - 1] || belegId))};
 
 const rowNumber =
   ${jsonForHtml(result.rowNumber)};
@@ -3884,11 +3763,23 @@ function chairmanDecision(
     .withSuccessHandler(
       function(result) {
 
-        document.getElementById(
-          "result"
-        ).innerHTML =
+        const box =
+          document.getElementById(
+            "result"
+          );
+
+        box.innerHTML =
           "✅ " +
           result;
+
+        box.style.display =
+          "block";
+
+        buttons.forEach(
+          function(button) {
+            button.style.display = "none";
+          }
+        );
 
       }
     )
@@ -3931,7 +3822,7 @@ Beleggenehmigung KGV Neuenhof
 </h1>
 
 <div class="beleg-id">
-Beleg ${htmlEscape(belegId)}
+Beleg ${htmlEscape(result.values[COL.BELEG_ID - 1] || belegId)}
 </div>
 
 
@@ -4404,7 +4295,7 @@ window.addEventListener("load", renderPaymentQr);
 
 
 const belegId =
-  ${jsonForHtml(String(belegId))};
+  ${jsonForHtml(String(result.values[COL.BELEG_ID - 1] || belegId))};
 
 const rowNumber =
   ${jsonForHtml(result.rowNumber)};
@@ -4489,7 +4380,7 @@ function transferDone() {
 </h1>
 
 <div class="beleg-id">
-Beleg ${htmlEscape(belegId)}
+Beleg ${htmlEscape(result.values[COL.BELEG_ID - 1] || belegId)}
 </div>
 
 
@@ -5273,6 +5164,8 @@ function loadOverview() {
 
         rows = data;
 
+        fillStatusFilter();
+
         renderTable();
 
       }
@@ -5489,6 +5382,42 @@ function renderTable() {
 }
 
 
+function fillStatusFilter() {
+
+  const select =
+    document.getElementById(
+      "statusFilter"
+    );
+
+  const seen = {};
+
+  rows.forEach(
+    function(item) {
+
+      if (!item.status || seen[item.status]) {
+        return;
+      }
+
+      seen[item.status] = true;
+
+      const option =
+        document.createElement(
+          "option"
+        );
+
+      option.value = item.status;
+      option.textContent = item.status;
+
+      select.appendChild(
+        option
+      );
+
+    }
+  );
+
+}
+
+
 function sortBy(
   field
 ) {
@@ -5645,9 +5574,6 @@ Aktion
 </tbody>
 
 </table>
-<div id="sepaQrCodePayment" style="text-align:center;padding:10px">
-  <div class="small">SEPA-QR-Code</div>
-</div>
 
 
 </div>
