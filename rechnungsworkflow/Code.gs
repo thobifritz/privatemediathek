@@ -32,6 +32,12 @@ const CONFIG = {
 
   PAYEE_SHEET_NAME: "Zahlungsempfänger",
 
+  // Kopien der Belege liegen im Ordner der Tabelle:
+  // <Ordner der Tabelle>/Belegeingang[/Bezahlt|/Gebucht]
+  BELEG_ORDNER: "Belegeingang",
+  BELEG_ORDNER_BEZAHLT: "Bezahlt",
+  BELEG_ORDNER_GEBUCHT: "Gebucht",
+
   WEBAPP_URL:
     "https://script.google.com/a/macros/neuenhof-koeln.de/s/AKfycbyrWdMOXVOFDA0Z9hA3OCq9gZZzbc1tW1jfQeKaEIp1GNwAc3vhsllXYuuELDy5dFAk/exec",
 
@@ -98,7 +104,8 @@ const COL = {
 
   BEZAHLT_AM: 32,
   GEBUCHT_AM: 33,
-  INTERNE_ID: 34
+  INTERNE_ID: 34,
+  BELEGKOPIE_ID: 35
 
 };
 
@@ -665,6 +672,13 @@ function onFormSubmit(e) {
     );
 
   }
+
+
+  /******************************************************
+   * KOPIE IN "BELEGEINGANG"
+   ******************************************************/
+
+  syncBelegCopiesSafe(row);
 
 
   /******************************************************
@@ -4817,7 +4831,8 @@ function markAsPaid(
       date,
       Session.getScriptTimeZone(),
       "dd.MM.yyyy"
-    )
+    ) +
+    syncBelegCopiesSafe(row)
   );
 
 }
@@ -4894,7 +4909,8 @@ function markAsBooked(
       date,
       Session.getScriptTimeZone(),
       "dd.MM.yyyy"
-    )
+    ) +
+    syncBelegCopiesSafe(row)
   );
 
 }
@@ -4993,7 +5009,8 @@ function setAccountingDates(
 
 
   return (
-    "Die Datumsangaben wurden gespeichert."
+    "Die Datumsangaben wurden gespeichert." +
+    syncBelegCopiesSafe(row)
   );
 
 }
@@ -5063,6 +5080,248 @@ function parseDateInput(
 
 
   return date;
+
+}
+
+
+/************************************************************
+ * BELEGKOPIEN IM ORDNER "BELEGEINGANG"
+ *
+ * Dateiname:
+ *   <Eingangsdatum>_<Lieferant>_gezahlt am_<Datum>_gebucht am_<Datum>
+ * Unbekannte Daten werden mit "xx" ausgefüllt.
+ *
+ * Ablage:
+ *   noch nicht bezahlt  -> Belegeingang
+ *   bezahlt             -> Belegeingang/Bezahlt
+ *   gebucht             -> Belegeingang/Gebucht
+ *
+ * Die Drive-IDs der Kopien stehen in Spalte BELEGKOPIE_ID.
+ * Die Originaldatei aus dem Formular bleibt unverändert liegen.
+ ************************************************************/
+
+
+function getOrCreateFolder(parent, name) {
+
+  const folders =
+    parent.getFoldersByName(name);
+
+  return folders.hasNext()
+    ? folders.next()
+    : parent.createFolder(name);
+
+}
+
+
+function getBelegFolder(subfolderName) {
+
+  const spreadsheetFile =
+    DriveApp.getFileById(
+      SpreadsheetApp.getActiveSpreadsheet().getId()
+    );
+
+  const parents =
+    spreadsheetFile.getParents();
+
+  const base =
+    parents.hasNext()
+      ? parents.next()
+      : DriveApp.getRootFolder();
+
+  const eingang =
+    getOrCreateFolder(base, CONFIG.BELEG_ORDNER);
+
+  return subfolderName
+    ? getOrCreateFolder(eingang, subfolderName)
+    : eingang;
+
+}
+
+
+function extractDriveFileIds(uploadValue) {
+
+  // Ein Upload-Feld kann mehrere Links enthalten (durch Komma getrennt).
+  const ids = [];
+  const pattern = /id=([\w-]+)/g;
+  let match;
+
+  while ((match = pattern.exec(String(uploadValue || ""))) !== null) {
+    if (ids.indexOf(match[1]) < 0) {
+      ids.push(match[1]);
+    }
+  }
+
+  return ids;
+
+}
+
+
+function fileNameDate(value) {
+
+  if (!value) {
+    return "xx";
+  }
+
+  const date = new Date(value);
+
+  if (isNaN(date.getTime())) {
+    return "xx";
+  }
+
+  return Utilities.formatDate(
+    date,
+    Session.getScriptTimeZone(),
+    "yyyy-MM-dd"
+  );
+
+}
+
+
+function getFileExtension(name) {
+
+  const match =
+    String(name || "").match(/\.[A-Za-z0-9]{1,5}$/);
+
+  return match ? match[0] : "";
+
+}
+
+
+function buildBelegCopyBaseName(values) {
+
+  const supplier =
+    String(values[COL.LIEFERANT - 1] || "Unbekannt")
+      .trim()
+      .replace(/[^\wäöüÄÖÜß-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .substring(0, 60) || "Unbekannt";
+
+  return (
+    fileNameDate(values[COL.ZEITSTEMPEL - 1]) + "_" +
+    supplier + "_" +
+    "gezahlt am_" + fileNameDate(values[COL.BEZAHLT_AM - 1]) + "_" +
+    "gebucht am_" + fileNameDate(values[COL.GEBUCHT_AM - 1])
+  );
+
+}
+
+
+function syncBelegCopies(rowNumber) {
+
+  const sheet = getSheet();
+
+  if (!sheet.getRange(1, COL.BELEGKOPIE_ID).getValue()) {
+    sheet.getRange(1, COL.BELEGKOPIE_ID).setValue("Belegkopie (Drive-IDs)");
+  }
+
+  const values =
+    sheet
+      .getRange(rowNumber, 1, 1, COL.BELEGKOPIE_ID)
+      .getValues()[0];
+
+  let copyIds =
+    String(values[COL.BELEGKOPIE_ID - 1] || "")
+      .split(",")
+      .map(function(id) { return id.trim(); })
+      .filter(String);
+
+  const baseName =
+    buildBelegCopyBaseName(values);
+
+
+  // Zielordner nach Bearbeitungsstand
+  let folderLabel = CONFIG.BELEG_ORDNER;
+  let target;
+
+  if (values[COL.GEBUCHT_AM - 1]) {
+    target = getBelegFolder(CONFIG.BELEG_ORDNER_GEBUCHT);
+    folderLabel += "/" + CONFIG.BELEG_ORDNER_GEBUCHT;
+  } else if (values[COL.BEZAHLT_AM - 1]) {
+    target = getBelegFolder(CONFIG.BELEG_ORDNER_BEZAHLT);
+    folderLabel += "/" + CONFIG.BELEG_ORDNER_BEZAHLT;
+  } else {
+    target = getBelegFolder("");
+  }
+
+
+  // Noch keine Kopie vorhanden (neuer Beleg oder Beleg von vor
+  // Einführung dieser Funktion): jetzt aus dem Upload anlegen.
+  if (!copyIds.length) {
+
+    const sourceIds =
+      extractDriveFileIds(values[COL.UPLOAD - 1]);
+
+    if (!sourceIds.length) {
+      return "";
+    }
+
+    copyIds =
+      sourceIds.map(function(sourceId, index) {
+
+        const source = DriveApp.getFileById(sourceId);
+
+        const name =
+          baseName +
+          (sourceIds.length > 1 ? "_" + (index + 1) : "") +
+          getFileExtension(source.getName());
+
+        return source.makeCopy(name, target).getId();
+
+      });
+
+    sheet
+      .getRange(rowNumber, COL.BELEGKOPIE_ID)
+      .setValue(copyIds.join(","));
+
+    return folderLabel;
+
+  }
+
+
+  // Vorhandene Kopien umbenennen und verschieben
+  copyIds.forEach(function(copyId, index) {
+
+    const file = DriveApp.getFileById(copyId);
+
+    file.setName(
+      baseName +
+      (copyIds.length > 1 ? "_" + (index + 1) : "") +
+      getFileExtension(file.getName())
+    );
+
+    file.moveTo(target);
+
+  });
+
+  return folderLabel;
+
+}
+
+
+// Ein Fehler bei der Ablage darf die eigentliche Aktion
+// (Formulareingang, bezahlt, gebucht) nicht abbrechen.
+// Rückgabe: Zusatztext für die Erfolgsmeldung.
+function syncBelegCopiesSafe(rowNumber) {
+
+  try {
+
+    const folder = syncBelegCopies(rowNumber);
+
+    return folder
+      ? " Belegkopie liegt in " + folder + "."
+      : "";
+
+  } catch (error) {
+
+    Logger.log("Belegkopie: " + error);
+
+    return (
+      " Hinweis: Die Belegkopie konnte nicht abgelegt werden (" +
+      (error && error.message ? error.message : error) +
+      ")."
+    );
+
+  }
 
 }
 
