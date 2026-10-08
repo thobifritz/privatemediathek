@@ -37,6 +37,7 @@ const CONFIG = {
   BELEG_ORDNER: "Belegeingang",
   BELEG_ORDNER_BEZAHLT: "Bezahlt",
   BELEG_ORDNER_GEBUCHT: "Gebucht",
+  BELEG_ORDNER_GELOESCHT: "Gelöscht",
 
   WEBAPP_URL:
     "https://script.google.com/a/macros/neuenhof-koeln.de/s/AKfycbyrWdMOXVOFDA0Z9hA3OCq9gZZzbc1tW1jfQeKaEIp1GNwAc3vhsllXYuuELDy5dFAk/exec",
@@ -5095,6 +5096,7 @@ function parseDateInput(
  *   noch nicht bezahlt  -> Belegeingang
  *   bezahlt             -> Belegeingang/Bezahlt
  *   gebucht             -> Belegeingang/Gebucht
+ *   Beleg gelöscht      -> Belegeingang/Gelöscht
  *
  * Die Drive-IDs der Kopien stehen in Spalte BELEGKOPIE_ID.
  * Die Originaldatei aus dem Formular bleibt unverändert liegen.
@@ -5206,7 +5208,7 @@ function buildBelegCopyBaseName(values) {
 }
 
 
-function syncBelegCopies(rowNumber) {
+function syncBelegCopies(rowNumber, deleted) {
 
   const sheet = getSheet();
 
@@ -5233,7 +5235,10 @@ function syncBelegCopies(rowNumber) {
   let folderLabel = CONFIG.BELEG_ORDNER;
   let target;
 
-  if (values[COL.GEBUCHT_AM - 1]) {
+  if (deleted) {
+    target = getBelegFolder(CONFIG.BELEG_ORDNER_GELOESCHT);
+    folderLabel += "/" + CONFIG.BELEG_ORDNER_GELOESCHT;
+  } else if (values[COL.GEBUCHT_AM - 1]) {
     target = getBelegFolder(CONFIG.BELEG_ORDNER_GEBUCHT);
     folderLabel += "/" + CONFIG.BELEG_ORDNER_GEBUCHT;
   } else if (values[COL.BEZAHLT_AM - 1]) {
@@ -5301,11 +5306,11 @@ function syncBelegCopies(rowNumber) {
 // Ein Fehler bei der Ablage darf die eigentliche Aktion
 // (Formulareingang, bezahlt, gebucht) nicht abbrechen.
 // Rückgabe: Zusatztext für die Erfolgsmeldung.
-function syncBelegCopiesSafe(rowNumber) {
+function syncBelegCopiesSafe(rowNumber, deleted) {
 
   try {
 
-    const folder = syncBelegCopies(rowNumber);
+    const folder = syncBelegCopies(rowNumber, deleted);
 
     return folder
       ? " Belegkopie liegt in " + folder + "."
@@ -5350,6 +5355,12 @@ function deleteBeleg(
   }
 
 
+  // Belegkopie vor dem Löschen der Zeile nach "Gelöscht" verschieben,
+  // danach sind die Drive-IDs nicht mehr in der Tabelle.
+  const ablage =
+    syncBelegCopiesSafe(row, true);
+
+
   sheet.deleteRow(
     row
   );
@@ -5358,7 +5369,8 @@ function deleteBeleg(
   return (
     "Beleg " +
     belegId +
-    " wurde aus der Belegliste gelöscht."
+    " wurde aus der Belegliste gelöscht." +
+    ablage
   );
 
 }
