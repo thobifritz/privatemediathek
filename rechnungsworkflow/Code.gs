@@ -38,6 +38,8 @@ const CONFIG = {
   BELEG_ORDNER_BEZAHLT: "Bezahlt",
   BELEG_ORDNER_GEBUCHT: "Gebucht",
   BELEG_ORDNER_GELOESCHT: "Gelöscht",
+  // Originaldateien, die über "Neuer Vorgang" hochgeladen werden
+  BELEG_ORDNER_ORIGINALE: "Originale Eingabeseite",
 
   WEBAPP_URL:
     "https://script.google.com/a/macros/neuenhof-koeln.de/s/AKfycbyrWdMOXVOFDA0Z9hA3OCq9gZZzbc1tW1jfQeKaEIp1GNwAc3vhsllXYuuELDy5dFAk/exec",
@@ -106,9 +108,39 @@ const COL = {
   BEZAHLT_AM: 32,
   GEBUCHT_AM: 33,
   INTERNE_ID: 34,
-  BELEGKOPIE_ID: 35
+  BELEGKOPIE_ID: 35,
+
+  VORGANGSART: 36,
+  ZUSATZANGABEN: 37,
+  EINNAHME: 38
 
 };
+
+// Höchste vom Skript genutzte Spalte
+const COL_MAX = 38;
+
+// Neue Spalten bekommen beim ersten Zugriff eine Überschrift.
+const COL_HEADERS = {
+  34: "Interne Beleg-ID",
+  35: "Belegkopie (Drive-IDs)",
+  36: "Vorgangsart",
+  37: "Zusatzangaben",
+  38: "Einnahme"
+};
+
+const VORGANGSARTEN = [
+  "Rechnung",
+  "Eigenbeleg",
+  "Auszahlung Kaution",
+  "Auszahlung Kaution nach Nachkontrolle",
+  "Quittung Wertgutachten",
+  "Anderer Vorgang"
+];
+
+const VORGANGSART_STANDARD = "Rechnung";
+
+const STATUS_EINNAHME_OFFEN = "Offen – Zahlung erwartet";
+const STATUS_EINNAHME_EINGEGANGEN = "Zahlung eingegangen";
 
 
 
@@ -173,7 +205,166 @@ function getSheet() {
     );
   }
 
+  ensureColumns(sheet);
+
   return sheet;
+}
+
+
+// Stellt sicher, dass alle vom Skript genutzten Spalten existieren
+// und eine Überschrift haben (einmal pro Skriptausführung).
+let columnsChecked = false;
+
+function ensureColumns(sheet) {
+
+  if (columnsChecked) {
+    return;
+  }
+
+  if (sheet.getMaxColumns() < COL_MAX) {
+    sheet.insertColumnsAfter(
+      sheet.getMaxColumns(),
+      COL_MAX - sheet.getMaxColumns()
+    );
+  }
+
+  const headerRange = sheet.getRange(1, 1, 1, COL_MAX);
+  const headers = headerRange.getValues()[0];
+  let changed = false;
+
+  Object.keys(COL_HEADERS).forEach(function(col) {
+    if (!String(headers[col - 1] || "").trim()) {
+      headers[col - 1] = COL_HEADERS[col];
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    headerRange.setValues([headers]);
+  }
+
+  columnsChecked = true;
+
+}
+
+
+// Überschrift einer Spalte aus Zeile 1 (z. B. für Spalte I,
+// deren Bedeutung im Formular festgelegt wird).
+function getColumnHeader(col, fallback) {
+
+  const value =
+    String(getSheet().getRange(1, col).getValue() || "").trim();
+
+  return value || fallback || "";
+
+}
+
+
+// Betrag aus Formular/Eingabe in eine Zahl umwandeln.
+// Erlaubt: 12,50 · 12.50 · 1.234,56 · 12,50 €
+// Leere Eingabe ergibt "". Ungültige Eingabe wirft einen Fehler.
+function parseAmount(value) {
+
+  if (typeof value === "number") {
+    return value;
+  }
+
+  let text =
+    String(value || "")
+      .replace(/[€\s]/g, "")
+      .trim();
+
+  if (!text) {
+    return "";
+  }
+
+  if (text.indexOf(",") >= 0) {
+    text = text.replace(/\./g, "").replace(",", ".");
+  }
+
+  const number = Number(text);
+
+  if (isNaN(number) || number < 0) {
+    throw new Error("Ungültiger Betrag: " + value);
+  }
+
+  return Math.round(number * 100) / 100;
+
+}
+
+
+function isEinnahme(values) {
+  return String(values[COL.EINNAHME - 1] || "").trim() === "Ja";
+}
+
+
+function getVorgangsart(values) {
+  return String(values[COL.VORGANGSART - 1] || "").trim() || VORGANGSART_STANDARD;
+}
+
+
+// Betrag darf nicht mehr geändert werden, sobald überwiesen wurde.
+function isAmountLocked(values) {
+
+  if (values[COL.UEBERWIESEN_AM - 1]) {
+    return true;
+  }
+
+  const status = String(values[COL.STATUS - 1] || "");
+
+  return [
+    "Überwiesen",
+    "Bezahlt",
+    "Gebucht",
+    STATUS_EINNAHME_EINGEGANGEN
+  ].indexOf(status) >= 0;
+
+}
+
+
+/************************************************************
+ * NÄCHSTE BELEG-ID (JJJJ-NNNN)
+ *
+ * Nur innerhalb eines Script-Locks aufrufen.
+ * Die Nummer wird aus der höchsten vorhandenen Nummer des
+ * Jahres abgeleitet, nicht aus der Zeilennummer.
+ ************************************************************/
+
+function nextBelegId(sheet, year) {
+
+  const lastRow =
+    sheet.getLastRow();
+
+  const existingIds =
+    lastRow >= 2
+      ? sheet
+          .getRange(2, COL.BELEG_ID, lastRow - 1, 1)
+          .getValues()
+      : [];
+
+  let highestNumber = 0;
+
+  existingIds.forEach(function(item) {
+
+    const match =
+      String(item[0] || "").trim()
+        .match(new RegExp("^(\\d{4})-(\\d+)$"));
+
+    if (!match || Number(match[1]) !== Number(year)) {
+      return;
+    }
+
+    highestNumber =
+      Math.max(highestNumber, Number(match[2]));
+
+  });
+
+  return (
+    year +
+    "-" +
+    Utilities.formatString("%04d", highestNumber + 1)
+  );
+
 }
 
 
@@ -251,7 +442,7 @@ function getRowData(identifier, useInternalId) {
   const sheet=getSheet();
   const rowNumber=useInternalId ? findRowByInternalId(identifier) : findRowByBelegId(identifier);
   if(!rowNumber) return null;
-  const values=sheet.getRange(rowNumber,1,1,Math.max(sheet.getLastColumn(),COL.INTERNE_ID)).getValues()[0];
+  const values=sheet.getRange(rowNumber,1,1,COL_MAX).getValues()[0];
   getOrCreateInternalId(rowNumber);
   values[COL.INTERNE_ID-1]=sheet.getRange(rowNumber,COL.INTERNE_ID).getValue();
   return {rowNumber:rowNumber,values:values};
@@ -368,7 +559,8 @@ function getStatusClass(status) {
       .toLowerCase();
 
   if (
-    s.indexOf("neu") >= 0
+    s.indexOf("neu") >= 0 ||
+    s.indexOf("offen") >= 0
   ) {
     return "status-neu";
   }
@@ -515,54 +707,8 @@ function onFormSubmit(e) {
         ? timestamp.getFullYear()
         : new Date().getFullYear();
 
-    const lastRow =
-      sheet.getLastRow();
-
-    const existingIds =
-      lastRow >= 2
-        ? sheet
-            .getRange(2, COL.BELEG_ID, lastRow - 1, 1)
-            .getValues()
-        : [];
-
-    let highestNumber = 0;
-
-    existingIds.forEach(function(item) {
-
-      const id =
-        String(item[0] || "").trim();
-
-      const match =
-        id.match(new RegExp("^(\\d{4})-(\\d+)$"));
-
-      if (!match) {
-        return;
-      }
-
-      if (Number(match[1]) !== Number(year)) {
-        return;
-      }
-
-      const number =
-        Number(match[2]);
-
-      if (number > highestNumber) {
-        highestNumber = number;
-      }
-
-    });
-
-    const nextNumber =
-      highestNumber + 1;
-
     belegId =
-      year +
-      "-" +
-      Utilities.formatString(
-        "%04d",
-        nextNumber
-      );
-
+      nextBelegId(sheet, year);
     sheet
       .getRange(row, COL.BELEG_ID)
       .setValue(belegId);
@@ -570,6 +716,12 @@ function onFormSubmit(e) {
     sheet
       .getRange(row, COL.STATUS)
       .setValue("Neu");
+
+    if (!sheet.getRange(row, COL.VORGANGSART).getValue()) {
+      sheet
+        .getRange(row, COL.VORGANGSART)
+        .setValue(VORGANGSART_STANDARD);
+    }
 
   } finally {
 
@@ -747,6 +899,19 @@ function doGet(e) {
 
   const uebersicht =
     params.uebersicht || "";
+
+
+  if (params.neu === "1") {
+
+    return HtmlService
+      .createHtmlOutput(
+        createNewEntryPage()
+      )
+      .setTitle(
+        "Neuer Vorgang – KGV Neuenhof"
+      );
+
+  }
 
 
   if (
@@ -1157,6 +1322,10 @@ textarea {
   background: #d9ead3;
 }
 
+.hidden {
+  display: none;
+}
+
 .warning {
   margin-top: 15px;
   padding: 12px;
@@ -1303,6 +1472,12 @@ function createDetailPage(
       row[COL.GEBUCHT_AM - 1]
     );
 
+  const einnahme =
+    isEinnahme(row);
+
+  const bezahltLabel =
+    einnahme ? "Eingegangen am" : "Bezahlt am";
+
 
   let originalAnzeige =
     originalbeleg === "Ja"
@@ -1382,7 +1557,7 @@ const belegId =
 const rowNumber =
   ${jsonForHtml(result.rowNumber)};
 
-const sepaAmount =
+let sepaAmount =
   ${jsonForHtml(String(betrag || "").replace(/[^\d,.-]/g, "").replace(",", "."))};
 
 const payees =
@@ -1423,6 +1598,12 @@ function buildSepaPayload() {
     purpose.substring(0, 140)
   ].join("\\n");
 }
+
+function onFormDataSaved(result) {
+  sepaAmount = result.amountRaw;
+  renderSepaQrCode();
+}
+
 
 function renderSepaQrCode() {
   const box = document.getElementById("sepaQrCode");
@@ -2080,6 +2261,53 @@ function deleteBeleg() {
 }
 
 
+function chairmanApprovedManually() {
+
+  if (!confirm("Eintragen, dass der 1. Vorsitzende diesen Beleg genehmigt hat?")) {
+    return;
+  }
+
+  const button =
+    document.getElementById(
+      "chairmanApprovedButton"
+    );
+
+  button.disabled = true;
+
+  google.script.run
+
+    .withSuccessHandler(
+      function(result) {
+
+        button.style.display = "none";
+
+        showMessage(
+          result
+        );
+
+      }
+    )
+
+    .withFailureHandler(
+      function(error) {
+
+        button.disabled = false;
+
+        alert(
+          "Fehler: " +
+          error.message
+        );
+
+      }
+    )
+
+    .chairmanApprovedManuallyByRow(
+      rowNumber
+    );
+
+}
+
+
 function chooseAction(
   action
 ) {
@@ -2145,6 +2373,8 @@ function chooseAction(
 
 
 
+
+${formDataEditorJs()}
 </script>
 
 </head>
@@ -2177,38 +2407,40 @@ ${htmlEscape(status)}
 <td>${htmlEscape(timestamp)}</td>
 </tr>
 
+${vorgangRowsHtml(row)}
+
 <tr>
 <td class="label">Einreicher</td>
-<td>${htmlEscape(einreicher)}</td>
+<td id="cell_einreicher">${htmlEscape(einreicher)}</td>
 </tr>
 
 <tr>
 <td class="label">Was wurde gekauft?</td>
-<td>${htmlEscape(gekauft)}</td>
+<td id="cell_gekauft">${htmlEscape(gekauft)}</td>
 </tr>
 
 <tr>
 <td class="label">Verwendungszweck</td>
-<td>${htmlEscape(zweck)}</td>
+<td id="cell_zweck">${htmlEscape(zweck)}</td>
 </tr>
 
 <tr>
 <td class="label">Lieferant</td>
-<td>${htmlEscape(lieferant)}</td>
+<td id="cell_lieferant">${htmlEscape(lieferant)}</td>
 </tr>
 
 <tr>
 <td class="label">Betrag</td>
-<td>${htmlEscape(betrag)} €</td>
+<td id="cell_betrag">${htmlEscape(formatAmountDisplay(betrag))} €</td>
 </tr>
 
 <tr>
 <td class="label">Auszahlung an</td>
-<td>${htmlEscape(auszahlungAn)}</td>
+<td id="cell_auszahlungAn">${htmlEscape(auszahlungAn)}</td>
 </tr>
 
 <tr>
-<td class="label">Rechnungsnummer</td>
+<td class="label">${htmlEscape(getColumnHeader(COL.RECHNUNGSNUMMER, "Rechnungsnummer"))}</td>
 <td>${htmlEscape(rechnungsnummer)}</td>
 </tr>
 
@@ -2219,10 +2451,13 @@ ${htmlEscape(status)}
 
 <tr>
 <td class="label">Dateiname</td>
-<td>${htmlEscape(dateiname)}</td>
+<td id="cell_dateiname">${htmlEscape(dateiname)}</td>
 </tr>
 
 </table>
+
+${formDataEditorHtml(row)}
+
 
 
 ${
@@ -2277,7 +2512,7 @@ ${
 </div>
 
 
-<div class="section">
+<div class="section ${einnahme ? "hidden" : ""}">
 
 <div class="section-title">
 Zahlungsdaten
@@ -2479,6 +2714,15 @@ auch bei laufender Genehmigung oder Überweisung sichtbar.
 </div>
 
 
+${
+  einnahme
+    ? `
+<div class="message">
+Einnahme: keine Genehmigung und keine Überweisung nötig.
+Bitte unten den Zahlungseingang und die Buchung eintragen.
+</div>
+`
+    : `
 <button
   class="button decision-button"
   onclick="chooseAction('Genehmigung Vorsitzender')"
@@ -2486,6 +2730,19 @@ auch bei laufender Genehmigung oder Überweisung sichtbar.
 → An 1. Vorsitzenden zur Genehmigung
 </button>
 
+${
+  genehmigung
+    ? ""
+    : `
+<button
+  id="chairmanApprovedButton"
+  class="button approve-button"
+  onclick="chairmanApprovedManually()"
+>
+✓ 1. Vorsitzender hat genehmigt
+</button>
+`
+}
 
 <button
   class="button decision-button"
@@ -2493,6 +2750,8 @@ auch bei laufender Genehmigung oder Überweisung sichtbar.
 >
 → Direkt an 2. Kassierer zur Überweisung
 </button>
+`
+}
 
 
 <button
@@ -2552,7 +2811,7 @@ ${htmlEscape(kommentar2Kassierer)}
 
 <tr>
 <td class="label">
-Bezahlt am
+${bezahltLabel}
 </td>
 <td>
 ${htmlEscape(bezahltAm)}
@@ -2574,7 +2833,7 @@ ${htmlEscape(gebuchtAm)}
 <div class="form-row">
 
 <div class="form-label">
-Bezahlt am
+${bezahltLabel}
 </div>
 
 <input
@@ -2613,7 +2872,7 @@ Gebucht am
   class="button payment-button"
   onclick="markAsPaid()"
 >
-✓ Als bezahlt markieren
+${einnahme ? "✓ Zahlung eingegangen" : "✓ Als bezahlt markieren"}
 </button>
 
 
@@ -2643,6 +2902,31 @@ Gebucht am
 </html>
 
 `;
+
+}
+
+
+/************************************************************
+ * TABELLENZEILEN VORGANGSART / ZUSATZANGABEN
+ ************************************************************/
+
+
+function vorgangRowsHtml(values) {
+
+  const zusatz =
+    String(values[COL.ZUSATZANGABEN - 1] || "").trim();
+
+  return (
+    "<tr><td class=\"label\">Vorgangsart</td><td>" +
+    htmlEscape(getVorgangsart(values)) +
+    (isEinnahme(values) ? " <strong>(Einnahme)</strong>" : "") +
+    "</td></tr>" +
+    (zusatz
+      ? "<tr><td class=\"label\">Zusatzangaben</td><td>" +
+        htmlEscape(zusatz).split("\n").join("<br>") +
+        "</td></tr>"
+      : "")
+  );
 
 }
 
@@ -2749,6 +3033,25 @@ function chairmanDecisionByRow(rowNumber, decision, comment) {
     decision,
     comment || ""
   );
+}
+
+// Genehmigung, die außerhalb des Systems erfolgt ist (z. B. mündlich
+// oder in einer Sitzung). Keine Mail an den Vorsitzenden.
+function chairmanApprovedManuallyByRow(rowNumber) {
+
+  const sheet = getSheet();
+  const n = Number(rowNumber);
+
+  getBelegIdFromRow(n);
+
+  sheet.getRange(n, COL.GENEHMIGUNG_VORSITZENDER).setValue("Genehmigt");
+  sheet.getRange(n, COL.DATUM_GENEHMIGUNG).setValue(new Date());
+  sheet.getRange(n, COL.KOMMENTAR_VORSITZENDER).setValue("Genehmigung durch 1. Kassierer eingetragen");
+  sheet.getRange(n, COL.STATUS).setValue("Genehmigt");
+  sheet.getRange(n, COL.LETZTE_BEARBEITUNG).setValue("Genehmigung Vorsitzender eingetragen");
+
+  return "Genehmigung des 1. Vorsitzenden wurde eingetragen.";
+
 }
 
 function transferDoneByRow(rowNumber, comment) {
@@ -3492,11 +3795,7 @@ function sendToSecondCashier(
 
   const subject =
     "Bitte neue Überweisung anlegen – " +
-    (
-      rechnungsnummer
-        ? rechnungsnummer
-        : belegId
-    );
+    belegId;
 
 
   const url =
@@ -3516,7 +3815,7 @@ function sendToSecondCashier(
     belegId +
     "\n" +
 
-    "Rechnungsnummer: " +
+    getColumnHeader(COL.RECHNUNGSNUMMER, "Rechnungsnummer") + ": " +
     (
       rechnungsnummer || "-"
     ) +
@@ -3602,7 +3901,7 @@ function sendChairmanApprovalMail(
     belegId +
     "\n" +
 
-    "Rechnungsnummer: " +
+    getColumnHeader(COL.RECHNUNGSNUMMER, "Rechnungsnummer") + ": " +
     (
       rechnungsnummer || "-"
     ) +
@@ -3828,6 +4127,8 @@ function chairmanDecision(
 
 }
 
+
+${formDataEditorJs()}
 </script>
 
 </head>
@@ -3855,38 +4156,40 @@ ${htmlEscape(status)}
 
 <table style="margin-top:20px">
 
+${vorgangRowsHtml(row)}
+
 <tr>
 <td class="label">Einreicher</td>
-<td>${htmlEscape(einreicher)}</td>
+<td id="cell_einreicher">${htmlEscape(einreicher)}</td>
 </tr>
 
 <tr>
 <td class="label">Was wurde gekauft?</td>
-<td>${htmlEscape(gekauft)}</td>
+<td id="cell_gekauft">${htmlEscape(gekauft)}</td>
 </tr>
 
 <tr>
 <td class="label">Verwendungszweck</td>
-<td>${htmlEscape(zweck)}</td>
+<td id="cell_zweck">${htmlEscape(zweck)}</td>
 </tr>
 
 <tr>
 <td class="label">Lieferant</td>
-<td>${htmlEscape(lieferant)}</td>
+<td id="cell_lieferant">${htmlEscape(lieferant)}</td>
 </tr>
 
 <tr>
 <td class="label">Betrag</td>
-<td>${htmlEscape(betrag)} €</td>
+<td id="cell_betrag">${htmlEscape(formatAmountDisplay(betrag))} €</td>
 </tr>
 
 <tr>
 <td class="label">Auszahlung an</td>
-<td>${htmlEscape(auszahlungAn)}</td>
+<td id="cell_auszahlungAn">${htmlEscape(auszahlungAn)}</td>
 </tr>
 
 <tr>
-<td class="label">Rechnungsnummer</td>
+<td class="label">${htmlEscape(getColumnHeader(COL.RECHNUNGSNUMMER, "Rechnungsnummer"))}</td>
 <td>${htmlEscape(rechnungsnummer)}</td>
 </tr>
 
@@ -3897,10 +4200,13 @@ ${htmlEscape(status)}
 
 <tr>
 <td class="label">Dateiname</td>
-<td>${htmlEscape(filename)}</td>
+<td id="cell_dateiname">${htmlEscape(filename)}</td>
 </tr>
 
 </table>
+
+${formDataEditorHtml(row)}
+
 
 
 ${
@@ -4409,6 +4715,8 @@ ${htmlEscape(status)}
 
 <table style="margin-top:20px">
 
+${vorgangRowsHtml(row)}
+
 <tr>
 <td class="label">Einreicher</td>
 <td>${htmlEscape(einreicher)}</td>
@@ -4440,7 +4748,7 @@ ${htmlEscape(status)}
 </tr>
 
 <tr>
-<td class="label">Rechnungsnummer</td>
+<td class="label">${htmlEscape(getColumnHeader(COL.RECHNUNGSNUMMER, "Rechnungsnummer"))}</td>
 <td>${htmlEscape(rechnungsnummer)}</td>
 </tr>
 
@@ -4805,13 +5113,18 @@ function markAsPaid(
     );
 
 
+  const einnahme =
+    isEinnahme(
+      sheet.getRange(row, 1, 1, COL_MAX).getValues()[0]
+    );
+
   sheet
     .getRange(
       row,
       COL.STATUS
     )
     .setValue(
-      "Bezahlt"
+      einnahme ? STATUS_EINNAHME_EINGEGANGEN : "Bezahlt"
     );
 
 
@@ -4821,13 +5134,14 @@ function markAsPaid(
       COL.LETZTE_BEARBEITUNG
     )
     .setValue(
-      "Als bezahlt markiert"
+      einnahme ? "Zahlungseingang eingetragen" : "Als bezahlt markiert"
     );
 
 
   return (
-    "Der Beleg wurde als bezahlt markiert. " +
-    "Zahlungsdatum: " +
+    (einnahme
+      ? "Der Zahlungseingang wurde eingetragen. Eingangsdatum: "
+      : "Der Beleg wurde als bezahlt markiert. Zahlungsdatum: ") +
     Utilities.formatDate(
       date,
       Session.getScriptTimeZone(),
@@ -5201,7 +5515,8 @@ function buildBelegCopyBaseName(values) {
   return (
     fileNameDate(values[COL.ZEITSTEMPEL - 1]) + "_" +
     supplier + "_" +
-    "gezahlt am_" + fileNameDate(values[COL.BEZAHLT_AM - 1]) + "_" +
+    (isEinnahme(values) ? "eingegangen am_" : "gezahlt am_") +
+    fileNameDate(values[COL.BEZAHLT_AM - 1]) + "_" +
     "gebucht am_" + fileNameDate(values[COL.GEBUCHT_AM - 1])
   );
 
@@ -5212,13 +5527,9 @@ function syncBelegCopies(rowNumber, deleted) {
 
   const sheet = getSheet();
 
-  if (!sheet.getRange(1, COL.BELEGKOPIE_ID).getValue()) {
-    sheet.getRange(1, COL.BELEGKOPIE_ID).setValue("Belegkopie (Drive-IDs)");
-  }
-
   const values =
     sheet
-      .getRange(rowNumber, 1, 1, COL.BELEGKOPIE_ID)
+      .getRange(rowNumber, 1, 1, COL_MAX)
       .getValues()[0];
 
   let copyIds =
@@ -5417,6 +5728,999 @@ function getPayeeSuggestions(
 
 
 /************************************************************
+ * ANGABEN KORRIGIEREN (1. Kassierer und 1. Vorsitzender)
+ *
+ * Bearbeitbar: Einreicher, Gekauft, Verwendungszweck,
+ * Lieferant, Betrag, Auszahlung an.
+ * Der Betrag ist gesperrt, sobald überwiesen wurde.
+ * Bei geändertem Lieferanten werden Originaldatei(en) und
+ * Belegkopie umbenannt.
+ ************************************************************/
+
+
+const EDIT_FIELDS = [
+  { id: "einreicher", col: COL.EINREICHER, label: "Einreicher" },
+  { id: "gekauft", col: COL.GEKAUFT, label: "Was wurde gekauft?" },
+  { id: "zweck", col: COL.ZWECK, label: "Verwendungszweck" },
+  { id: "lieferant", col: COL.LIEFERANT, label: "Lieferant" },
+  { id: "betrag", col: COL.BETRAG, label: "Betrag (€)" },
+  { id: "auszahlungAn", col: COL.AUSZAHLUNG_AN, label: "Auszahlung an" }
+];
+
+
+function formatAmountDisplay(value) {
+
+  if (value === "" || value === null || value === undefined) {
+    return "";
+  }
+
+  return typeof value === "number"
+    ? value.toFixed(2).replace(".", ",")
+    : String(value);
+
+}
+
+
+function formDataEditorHtml(values) {
+
+  const locked = isAmountLocked(values);
+
+  const inputs =
+    EDIT_FIELDS.map(function(field) {
+
+      const raw = values[field.col - 1];
+
+      const value =
+        field.id === "betrag"
+          ? formatAmountDisplay(raw)
+          : String(raw === null || raw === undefined ? "" : raw);
+
+      const disabled =
+        field.id === "betrag" && locked;
+
+      return (
+        "<div class=\"form-row\">" +
+        "<div class=\"form-label\">" + htmlEscape(field.label) + "</div>" +
+        "<input id=\"edit_" + field.id + "\" value=\"" + htmlEscape(value) + "\"" +
+        (field.id === "betrag" ? " inputmode=\"decimal\"" : "") +
+        (disabled ? " disabled" : "") + ">" +
+        (disabled
+          ? "<div class=\"small\" style=\"font-size:13px;color:#666\">" +
+            "Der Betrag kann nach der Überweisung nicht mehr geändert werden.</div>"
+          : "") +
+        "</div>"
+      );
+
+    }).join("");
+
+  return `
+<button
+  id="editButton"
+  class="button secondary-button"
+  onclick="toggleFormDataEdit(true)"
+>
+✏️ Angaben bearbeiten
+</button>
+
+<div id="editMessage" class="message" style="display:none"></div>
+
+<div id="editSection" class="section hidden">
+
+<div class="section-title">Angaben korrigieren</div>
+
+${inputs}
+
+<button
+  id="saveFormDataButton"
+  class="button save-button"
+  onclick="saveFormData()"
+>
+💾 Korrektur speichern
+</button>
+
+<button
+  class="button back-button"
+  onclick="cancelFormDataEdit()"
+>
+Abbrechen
+</button>
+
+</div>
+`;
+
+}
+
+
+// Browser-Skript für die Korrektur. Erwartet die Variable rowNumber.
+// Keine Backslashes verwenden: der Text steht in einem Template-String.
+function formDataEditorJs() {
+
+  return `
+
+const EDIT_IDS = ${jsonForHtml(EDIT_FIELDS.map(function(f) { return f.id; }))};
+
+
+function toggleFormDataEdit(show) {
+
+  document.getElementById("editSection").classList.toggle("hidden", !show);
+  document.getElementById("editButton").classList.toggle("hidden", show);
+
+  if (show) {
+    document.getElementById("editMessage").style.display = "none";
+  }
+
+}
+
+
+function cancelFormDataEdit() {
+
+  EDIT_IDS.forEach(function(id) {
+    const input = document.getElementById("edit_" + id);
+    input.value = input.defaultValue;
+  });
+
+  toggleFormDataEdit(false);
+
+}
+
+
+function saveFormData() {
+
+  const data = {};
+
+  EDIT_IDS.forEach(function(id) {
+    data[id] = document.getElementById("edit_" + id).value;
+  });
+
+  const button = document.getElementById("saveFormDataButton");
+  button.disabled = true;
+  button.innerText = "Wird gespeichert...";
+
+  google.script.run
+
+    .withSuccessHandler(function(result) {
+
+      button.disabled = false;
+      button.innerText = "💾 Korrektur speichern";
+
+      Object.keys(result.values).forEach(function(id) {
+
+        const cell = document.getElementById("cell_" + id);
+        const input = document.getElementById("edit_" + id);
+        const value = result.values[id];
+
+        if (cell) {
+          cell.innerText =
+            id === "betrag" && value !== "" ? value + " €" : value;
+        }
+
+        if (input) {
+          input.value = value;
+          input.defaultValue = value;
+        }
+
+      });
+
+      toggleFormDataEdit(false);
+
+      const box = document.getElementById("editMessage");
+      box.innerText = "✅ " + result.message;
+      box.style.display = "block";
+
+      if (typeof onFormDataSaved === "function") {
+        onFormDataSaved(result);
+      }
+
+    })
+
+    .withFailureHandler(function(error) {
+
+      button.disabled = false;
+      button.innerText = "💾 Korrektur speichern";
+      alert("Fehler: " + (error && error.message ? error.message : error));
+
+    })
+
+    .saveFormDataByRow(rowNumber, data);
+
+}
+
+`;
+
+}
+
+
+function saveFormDataByRow(rowNumber, data) {
+
+  data = data || {};
+
+  const sheet = getSheet();
+  const n = Number(rowNumber);
+  const belegId = getBelegIdFromRow(n);
+  const values = sheet.getRange(n, 1, 1, COL_MAX).getValues()[0];
+  const text = function(value) { return String(value === null || value === undefined ? "" : value).trim(); };
+
+
+  // Betrag prüfen
+  const newAmount = parseAmount(data.betrag);
+  const oldAmountRaw = values[COL.BETRAG - 1];
+  let oldAmount;
+
+  try {
+    oldAmount = parseAmount(oldAmountRaw);
+  } catch (e) {
+    oldAmount = text(oldAmountRaw);
+  }
+
+  const amountChanged = newAmount !== oldAmount;
+
+  if (amountChanged && isAmountLocked(values)) {
+    throw new Error(
+      "Der Betrag kann nach der Überweisung nicht mehr geändert werden."
+    );
+  }
+
+
+  const oldSupplier = text(values[COL.LIEFERANT - 1]);
+  const newSupplier = text(data.lieferant);
+
+  EDIT_FIELDS.forEach(function(field) {
+
+    if (field.id === "betrag") {
+      if (amountChanged) {
+        sheet.getRange(n, field.col).setValue(newAmount);
+      }
+      return;
+    }
+
+    sheet.getRange(n, field.col).setValue(text(data[field.id]));
+
+  });
+
+  sheet
+    .getRange(n, COL.LETZTE_BEARBEITUNG)
+    .setValue("Angaben korrigiert");
+
+
+  let hint = "";
+  let dateiname = text(values[COL.DATEINAME - 1]);
+
+  if (newSupplier !== oldSupplier) {
+
+    // Originaldatei(en) umbenennen: <Beleg-ID>_<Lieferant>[_n].<Endung>
+    try {
+
+      const ids = extractDriveFileIds(values[COL.UPLOAD - 1]);
+
+      if (ids.length) {
+
+        dateiname =
+          ids.map(function(id, index) {
+            const file = DriveApp.getFileById(id);
+            const name = originalFileName(
+              belegId, newSupplier, index, ids.length, file.getName());
+            file.setName(name);
+            return name;
+          }).join(", ");
+
+        sheet.getRange(n, COL.DATEINAME).setValue(dateiname);
+
+      }
+
+    } catch (error) {
+
+      Logger.log("Original umbenennen: " + error);
+      hint +=
+        " Hinweis: Die Originaldatei konnte nicht umbenannt werden (" +
+        (error && error.message ? error.message : error) + ").";
+
+    }
+
+    // Belegkopie trägt den Lieferanten im Namen
+    hint += syncBelegCopiesSafe(n);
+
+  }
+
+
+  const amount = amountChanged ? newAmount : oldAmountRaw;
+
+  return {
+    message: "Die Angaben wurden gespeichert." + hint,
+    amountRaw: typeof amount === "number" ? amount.toFixed(2) : String(amount || ""),
+    values: {
+      einreicher: text(data.einreicher),
+      gekauft: text(data.gekauft),
+      zweck: text(data.zweck),
+      lieferant: newSupplier,
+      betrag: formatAmountDisplay(amount),
+      auszahlungAn: text(data.auszahlungAn),
+      dateiname: dateiname
+    }
+  };
+
+}
+
+
+
+/************************************************************
+ * NEUER VORGANG – EINGABESEITE
+ *
+ * Zweiter Eingabeweg neben dem Google-Formular, z. B. für
+ * Kautionen, Eigenbelege oder Wertgutachten.
+ * Der Vorgang wird direkt in CONFIG.SHEET_NAME geschrieben,
+ * bekommt eine normale Beleg-ID und Status "Neu"
+ * (Einnahmen: "Offen – Zahlung erwartet"). Es wird keine
+ * Mail verschickt.
+ ************************************************************/
+
+
+function getActiveUserEmail() {
+
+  try {
+    return Session.getActiveUser().getEmail() || "";
+  } catch (e) {
+    return "";
+  }
+
+}
+
+
+function createNewEntryPage() {
+
+  const options =
+    VORGANGSARTEN.map(function(art) {
+      return (
+        "<option value=\"" + htmlEscape(art) + "\"" +
+        (art === VORGANGSART_STANDARD ? " selected" : "") +
+        ">" + htmlEscape(art) + "</option>"
+      );
+    }).join("");
+
+  return `
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>Neuer Vorgang – KGV Neuenhof</title>
+
+<style>
+
+${commonCss()}
+
+.payee-wrapper {
+  position: relative;
+}
+
+.payee-suggestions {
+  position: absolute;
+  z-index: 50;
+  left: 0;
+  right: 0;
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 0 0 7px 7px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: none;
+}
+
+.payee-suggestion {
+  padding: 10px;
+  cursor: pointer;
+  border-bottom: 1px solid #eee;
+}
+
+.payee-suggestion:hover {
+  background: #f1f3f4;
+}
+
+.small {
+  font-size: 13px;
+  color: #666;
+}
+
+.hidden {
+  display: none;
+}
+
+</style>
+
+<script>
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+
+function el(id) {
+  return document.getElementById(id);
+}
+
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+
+// Felder je nach Vorgangsart und Einnahme ein-/ausblenden
+function updateFields() {
+
+  const art = el("vorgangsart").value;
+  const einnahme = el("einnahme").checked;
+
+  el("rowNachkontrolle").classList.toggle(
+    "hidden", art !== "Auszahlung Kaution nach Nachkontrolle");
+
+  el("rowBegruendung").classList.toggle(
+    "hidden", art !== "Eigenbeleg");
+
+  el("payoutSection").classList.toggle(
+    "hidden", einnahme);
+
+  el("labelAuszahlungAn").innerText =
+    art === "Quittung Wertgutachten"
+      ? "Gutachter (Zahlungsempfänger)"
+      : "Auszahlung an (Zahlungsempfänger)";
+
+  el("labelLieferant").innerText =
+    einnahme
+      ? "Zahler (von wem kommt das Geld?)"
+      : "Lieferant / Aussteller";
+
+}
+
+
+function updatePayeeSuggestions() {
+
+  const input = el("auszahlungAn");
+  const box = el("payeeSuggestions");
+  const query = input.value.trim();
+
+  box.innerHTML = "";
+
+  if (!query) {
+    box.style.display = "none";
+    return;
+  }
+
+  google.script.run
+    .withSuccessHandler(function(matches) {
+
+      if (input.value.trim() !== query) return;
+
+      box.innerHTML = "";
+
+      if (!matches || !matches.length) {
+        box.style.display = "none";
+        return;
+      }
+
+      matches.forEach(function(item) {
+
+        const div = document.createElement("div");
+        div.className = "payee-suggestion";
+        div.innerHTML =
+          "<strong>" + escapeHtml(item.name) + "</strong><br>" +
+          "<span class='small'>" + escapeHtml(item.iban) +
+          (item.bic ? " · " + escapeHtml(item.bic) : "") + "</span>";
+
+        div.onclick = function() {
+          el("auszahlungAn").value = item.name;
+          el("iban").value = item.iban || "";
+          el("bic").value = item.bic || "";
+          box.style.display = "none";
+        };
+
+        box.appendChild(div);
+
+      });
+
+      box.style.display = "block";
+
+    })
+    .withFailureHandler(function() {
+      box.style.display = "none";
+    })
+    .getPayeeSuggestions(query);
+
+}
+
+
+function readFile(file) {
+
+  return new Promise(function(resolve, reject) {
+
+    if (file.size > MAX_FILE_SIZE) {
+      reject(new Error("Die Datei " + file.name + " ist größer als 10 MB."));
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = function() {
+      resolve({
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        data: String(reader.result).split(",")[1]
+      });
+    };
+
+    reader.onerror = function() {
+      reject(new Error("Die Datei " + file.name + " konnte nicht gelesen werden."));
+    };
+
+    reader.readAsDataURL(file);
+
+  });
+
+}
+
+
+function saveEntry() {
+
+  const button = el("saveButton");
+  const files = Array.prototype.slice.call(el("files").files || []);
+
+  button.disabled = true;
+  button.innerText = "Wird gespeichert...";
+
+  Promise.all(files.map(readFile))
+    .then(function(fileData) {
+
+      const data = {
+        vorgangsart: el("vorgangsart").value,
+        einnahme: el("einnahme").checked,
+        einreicher: el("einreicher").value,
+        parzelle: el("parzelle").value,
+        gekauft: el("gekauft").value,
+        zweck: el("zweck").value,
+        lieferant: el("lieferant").value,
+        betrag: el("betrag").value,
+        auszahlungAn: el("auszahlungAn").value,
+        iban: el("iban").value,
+        bic: el("bic").value,
+        masterUpdate: el("masterUpdate").checked,
+        datumNachkontrolle: el("datumNachkontrolle").value,
+        begruendung: el("begruendung").value,
+        bemerkung: el("bemerkung").value,
+        files: fileData
+      };
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+
+          el("entryForm").classList.add("hidden");
+          el("successBox").classList.remove("hidden");
+          el("successText").innerHTML =
+            "✅ " + escapeHtml(result.message);
+          el("openLink").href = result.url;
+
+        })
+        .withFailureHandler(function(error) {
+
+          button.disabled = false;
+          button.innerText = "💾 Vorgang speichern";
+          alert("Fehler: " + (error && error.message ? error.message : error));
+
+        })
+        .createManualEntry(data);
+
+    })
+    .catch(function(error) {
+
+      button.disabled = false;
+      button.innerText = "💾 Vorgang speichern";
+      alert("Fehler: " + error.message);
+
+    });
+
+}
+
+
+function newEntry() {
+
+  ["parzelle", "gekauft", "zweck", "lieferant", "betrag", "auszahlungAn",
+   "iban", "bic", "datumNachkontrolle", "begruendung", "bemerkung", "files"]
+    .forEach(function(id) { el(id).value = ""; });
+
+  el("einnahme").checked = false;
+  el("masterUpdate").checked = false;
+  el("saveButton").disabled = false;
+  el("saveButton").innerText = "💾 Vorgang speichern";
+
+  el("successBox").classList.add("hidden");
+  el("entryForm").classList.remove("hidden");
+
+  updateFields();
+  window.scrollTo(0, 0);
+
+}
+
+
+window.addEventListener("load", updateFields);
+
+document.addEventListener("click", function(event) {
+  if (!event.target.closest(".payee-wrapper")) {
+    el("payeeSuggestions").style.display = "none";
+  }
+});
+
+</script>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>
+Neuer Vorgang
+</h1>
+
+<p class="small">
+Alle Felder sind freiwillig. Der Vorgang erscheint danach
+mit Status „Neu“ in der Belegübersicht und wird dort wie
+ein Formular-Beleg weiterbearbeitet. Es wird keine E-Mail
+verschickt.
+</p>
+
+
+<div id="entryForm">
+
+<div class="section">
+
+<div class="form-row">
+<div class="form-label">Vorgangsart</div>
+<select id="vorgangsart" onchange="updateFields()">
+${options}
+</select>
+</div>
+
+<div class="checkbox-row" style="margin-top:0">
+<label>
+<input type="checkbox" id="einnahme" onchange="updateFields()">
+Einnahme (Geld kommt in die Vereinskasse)
+</label>
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="section-title">Angaben</div>
+
+<div class="form-row">
+<div class="form-label">Einreicher / Mitglied</div>
+<input id="einreicher" value="${htmlEscape(getActiveUserEmail())}">
+</div>
+
+<div class="form-row">
+<div class="form-label">Parzelle</div>
+<input id="parzelle" placeholder="z. B. 42">
+</div>
+
+<div class="form-row">
+<div class="form-label">Was wurde gekauft? / Gegenstand</div>
+<input id="gekauft">
+</div>
+
+<div class="form-row">
+<div class="form-label">Verwendungszweck</div>
+<input id="zweck">
+</div>
+
+<div class="form-row">
+<div class="form-label" id="labelLieferant">Lieferant / Aussteller</div>
+<input id="lieferant">
+</div>
+
+<div class="form-row">
+<div class="form-label">Betrag (€)</div>
+<input id="betrag" inputmode="decimal" placeholder="z. B. 150,00">
+</div>
+
+<div class="form-row hidden" id="rowNachkontrolle">
+<div class="form-label">Datum der Nachkontrolle</div>
+<input type="date" id="datumNachkontrolle">
+</div>
+
+<div class="form-row hidden" id="rowBegruendung">
+<div class="form-label">Begründung: Warum liegt kein Originalbeleg vor?</div>
+<textarea id="begruendung"></textarea>
+</div>
+
+<div class="form-row">
+<div class="form-label">Bemerkung</div>
+<textarea id="bemerkung"></textarea>
+</div>
+
+</div>
+
+
+<div class="section" id="payoutSection">
+
+<div class="section-title">Zahlungsempfänger</div>
+
+<div class="form-row">
+<div class="form-label" id="labelAuszahlungAn">Auszahlung an (Zahlungsempfänger)</div>
+<div class="payee-wrapper">
+<input
+  id="auszahlungAn"
+  autocomplete="off"
+  oninput="updatePayeeSuggestions()"
+  placeholder="Name eingeben"
+>
+<div id="payeeSuggestions" class="payee-suggestions"></div>
+</div>
+</div>
+
+<div class="form-row">
+<div class="form-label">IBAN</div>
+<input id="iban">
+</div>
+
+<div class="form-row">
+<div class="form-label">BIC</div>
+<input id="bic">
+</div>
+
+<div class="checkbox-row">
+<label>
+<input type="checkbox" id="masterUpdate">
+Zahlungsempfänger in den Stammdaten speichern/aktualisieren
+</label>
+</div>
+
+</div>
+
+
+<div class="section">
+
+<div class="section-title">Beleg</div>
+
+<input type="file" id="files" multiple accept="application/pdf,image/*">
+
+<div class="small" style="margin-top:8px">
+PDF oder Foto, max. 10 MB pro Datei. Mehrere Dateien möglich.
+</div>
+
+</div>
+
+
+<button
+  id="saveButton"
+  class="button save-button"
+  onclick="saveEntry()"
+>
+💾 Vorgang speichern
+</button>
+
+</div>
+
+
+<div id="successBox" class="hidden">
+
+<div class="message" id="successText"></div>
+
+<a
+  id="openLink"
+  class="button document-button"
+  href="#"
+  target="_blank"
+>
+📄 Vorgang öffnen
+</a>
+
+<button
+  class="button secondary-button"
+  onclick="newEntry()"
+>
++ Weiteren Vorgang erfassen
+</button>
+
+</div>
+
+
+<a
+  class="button back-button"
+  href="${CONFIG.WEBAPP_URL}?uebersicht=1"
+  target="_blank"
+>
+← Zur Belegübersicht
+</a>
+
+</div>
+
+</body>
+
+</html>
+
+`;
+
+}
+
+
+function safeFileNamePart(value, fallback) {
+
+  return (
+    String(value || "")
+      .trim()
+      .replace(/[^\wäöüÄÖÜß-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .substring(0, 60) ||
+    fallback
+  );
+
+}
+
+
+// Name der Originaldatei: <Beleg-ID>_<Lieferant>[_n].<Endung>
+function originalFileName(belegId, supplier, index, count, currentName) {
+
+  return (
+    belegId + "_" +
+    safeFileNamePart(supplier, "Beleg") +
+    (count > 1 ? "_" + (index + 1) : "") +
+    getFileExtension(currentName)
+  );
+
+}
+
+
+function createManualEntry(data) {
+
+  data = data || {};
+
+  const sheet = getSheet();
+
+  const art =
+    VORGANGSARTEN.indexOf(data.vorgangsart) >= 0
+      ? data.vorgangsart
+      : VORGANGSART_STANDARD;
+
+  const einnahme = !!data.einnahme;
+  const betrag = parseAmount(data.betrag);
+  const text = function(value) { return String(value || "").trim(); };
+
+
+  const zusatz = [];
+
+  if (text(data.parzelle)) {
+    zusatz.push("Parzelle: " + text(data.parzelle));
+  }
+
+  if (art === "Auszahlung Kaution nach Nachkontrolle" && text(data.datumNachkontrolle)) {
+    zusatz.push(
+      "Nachkontrolle am: " +
+      formatDate(parseDateInput(text(data.datumNachkontrolle)))
+    );
+  }
+
+  if (art === "Eigenbeleg" && text(data.begruendung)) {
+    zusatz.push("Begründung Eigenbeleg: " + text(data.begruendung));
+  }
+
+  if (text(data.bemerkung)) {
+    zusatz.push("Bemerkung: " + text(data.bemerkung));
+  }
+
+
+  // Dateien zuerst speichern: schlägt der Upload fehl,
+  // wird kein halber Vorgang angelegt.
+  const files = data.files || [];
+
+  const uploadFolder =
+    files.length ? getBelegFolder(CONFIG.BELEG_ORDNER_ORIGINALE) : null;
+
+  const uploadedFiles =
+    files.map(function(file) {
+      const blob = Utilities.newBlob(
+        Utilities.base64Decode(file.data),
+        file.mimeType,
+        file.name
+      );
+      return uploadFolder.createFile(blob);
+    });
+
+
+  const now = new Date();
+  const lock = LockService.getScriptLock();
+  let belegId;
+  let row;
+
+  lock.waitLock(30000);
+
+  try {
+
+    belegId = nextBelegId(sheet, now.getFullYear());
+
+    const values = new Array(COL_MAX).fill("");
+
+    values[COL.ZEITSTEMPEL - 1] = now;
+    values[COL.EINREICHER - 1] = text(data.einreicher);
+    values[COL.GEKAUFT - 1] = text(data.gekauft);
+    values[COL.ZWECK - 1] = text(data.zweck);
+    values[COL.LIEFERANT - 1] = text(data.lieferant);
+    values[COL.BETRAG - 1] = betrag;
+    values[COL.EMAIL - 1] = getActiveUserEmail();
+    values[COL.BELEG_ID - 1] = belegId;
+    values[COL.STATUS - 1] = einnahme ? STATUS_EINNAHME_OFFEN : "Neu";
+    values[COL.LETZTE_BEARBEITUNG - 1] = "Über Eingabeseite erfasst";
+    values[COL.INTERNE_ID - 1] = Utilities.getUuid();
+    values[COL.VORGANGSART - 1] = art;
+    values[COL.ZUSATZANGABEN - 1] = zusatz.join("\n");
+    values[COL.EINNAHME - 1] = einnahme ? "Ja" : "";
+
+    if (!einnahme) {
+      values[COL.AUSZAHLUNG_AN - 1] = text(data.auszahlungAn);
+      values[COL.ZAHLUNGSEMPFAENGER - 1] = text(data.auszahlungAn);
+      values[COL.IBAN - 1] = text(data.iban);
+      values[COL.BIC - 1] = text(data.bic);
+      values[COL.ZAHLUNGSZWECK - 1] = text(data.zweck);
+    }
+
+    if (uploadedFiles.length) {
+
+      values[COL.UPLOAD - 1] =
+        uploadedFiles.map(function(file) {
+          return "https://drive.google.com/open?id=" + file.getId();
+        }).join(", ");
+
+      values[COL.DATEINAME - 1] =
+        uploadedFiles.map(function(file, index) {
+          const name = originalFileName(
+            belegId, data.lieferant, index, uploadedFiles.length, file.getName());
+          file.setName(name);
+          return name;
+        }).join(", ");
+
+    }
+
+    row = sheet.getLastRow() + 1;
+
+    sheet
+      .getRange(row, 1, 1, COL_MAX)
+      .setValues([values]);
+
+  } finally {
+
+    lock.releaseLock();
+
+  }
+
+
+  if (!einnahme && data.masterUpdate && text(data.auszahlungAn)) {
+    savePayeeToMasterData(
+      text(data.auszahlungAn),
+      text(data.iban),
+      text(data.bic)
+    );
+  }
+
+
+  return {
+    belegId: belegId,
+    url: makeWebUrl(belegId),
+    message:
+      "Vorgang " + belegId + " (" + art + (einnahme ? ", Einnahme" : "") +
+      ") wurde angelegt." +
+      syncBelegCopiesSafe(row)
+  };
+
+}
+
+
+/************************************************************
  * BELEGÜBERSICHT
  ************************************************************/
 
@@ -5520,6 +6824,11 @@ function renderTable() {
       "statusFilter"
     ).value;
 
+  const art =
+    document.getElementById(
+      "artFilter"
+    ).value;
+
 
   let filtered =
     rows.filter(
@@ -5537,9 +6846,14 @@ function renderTable() {
           !status ||
           item.status === status;
 
+        const matchesArt =
+          !art ||
+          item.vorgangsart === art;
+
         return (
           matchesSearch &&
-          matchesStatus
+          matchesStatus &&
+          matchesArt
         );
 
       }
@@ -5580,6 +6894,13 @@ function renderTable() {
 
         av = Number(a.betrag) || 0;
         bv = Number(b.betrag) || 0;
+
+      } else if (
+        currentSort === "art"
+      ) {
+
+        av = a.vorgangsart;
+        bv = b.vorgangsart;
 
       } else if (
         currentSort === "status"
@@ -5647,6 +6968,10 @@ function renderTable() {
         "</td>" +
 
         "<td>" +
+        escapeHtml(item.vorgangsart) +
+        "</td>" +
+
+        "<td>" +
         escapeHtml(item.einreicher) +
         "</td>" +
 
@@ -5704,9 +7029,17 @@ function renderTable() {
 
 function fillStatusFilter() {
 
+  fillFilter("statusFilter", "status");
+  fillFilter("artFilter", "vorgangsart");
+
+}
+
+
+function fillFilter(selectId, field) {
+
   const select =
     document.getElementById(
-      "statusFilter"
+      selectId
     );
 
   const seen = {};
@@ -5714,19 +7047,21 @@ function fillStatusFilter() {
   rows.forEach(
     function(item) {
 
-      if (!item.status || seen[item.status]) {
+      const value = item[field];
+
+      if (!value || seen[value]) {
         return;
       }
 
-      seen[item.status] = true;
+      seen[value] = true;
 
       const option =
         document.createElement(
           "option"
         );
 
-      option.value = item.status;
-      option.textContent = item.status;
+      option.value = value;
+      option.textContent = value;
 
       select.appendChild(
         option
@@ -5796,6 +7131,16 @@ Belegübersicht KGV Neuenhof
 </h1>
 
 
+<a
+  class="button save-button"
+  style="margin-bottom:20px"
+  href="${CONFIG.WEBAPP_URL}?neu=1"
+  target="_blank"
+>
++ Neuer Vorgang
+</a>
+
+
 <div class="search">
 
 <input
@@ -5816,6 +7161,22 @@ Belegübersicht KGV Neuenhof
 
 <option value="">
 Alle Status
+</option>
+
+</select>
+
+</div>
+
+
+<div class="search">
+
+<select
+  id="artFilter"
+  onchange="renderTable()"
+>
+
+<option value="">
+Alle Vorgangsarten
 </option>
 
 </select>
@@ -5848,6 +7209,13 @@ onclick="sortBy('date')"
 style="cursor:pointer"
 >
 Datum
+</th>
+
+<th
+onclick="sortBy('art')"
+style="cursor:pointer"
+>
+Vorgang
 </th>
 
 <th
@@ -5899,12 +7267,6 @@ Aktion
 </div>
 
 
-<a
-  class="button back-button"
-  href="${CONFIG.WEBAPP_URL}"
->
-Startseite
-</a>
 
 
 </div>
@@ -5943,7 +7305,7 @@ function getOverviewData() {
         2,
         1,
         lastRow - 1,
-        COL.INTERNE_ID
+        COL_MAX
       )
       .getValues();
 
@@ -6037,7 +7399,11 @@ function getOverviewData() {
               row[
                 COL.STATUS - 1
               ] || ""
-            )
+            ),
+
+          vorgangsart:
+            getVorgangsart(row) +
+            (isEinnahme(row) ? " (Einnahme)" : "")
 
         };
 
