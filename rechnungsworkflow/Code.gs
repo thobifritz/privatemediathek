@@ -116,12 +116,14 @@ const COL = {
   VORGANGSART: 36,
   ZUSATZANGABEN: 37,
   EINNAHME: 38,
-  MTV_BUCHUNGSNUMMER: 39
+  MTV_BUCHUNGSNUMMER: 39,
+  UEBERWEISUNGSBETRAG: 40,
+  SAMMELUEBERWEISUNG: 41
 
 };
 
 // Höchste vom Skript genutzte Spalte
-const COL_MAX = 39;
+const COL_MAX = 41;
 
 // Neue Spalten bekommen beim ersten Zugriff eine Überschrift.
 const COL_HEADERS = {
@@ -130,7 +132,9 @@ const COL_HEADERS = {
   36: "Vorgangsart",
   37: "Zusatzangaben",
   38: "Einnahme",
-  39: "MTV Buchungsnummer"
+  39: "MTV Buchungsnummer",
+  40: "Überweisungsbetrag",
+  41: "Sammelüberweisung mit"
 };
 
 const VORGANGSARTEN = [
@@ -146,6 +150,38 @@ const VORGANGSART_STANDARD = "Rechnung";
 
 const STATUS_EINNAHME_OFFEN = "Offen – Zahlung erwartet";
 const STATUS_EINNAHME_EINGEGANGEN = "Zahlung eingegangen";
+
+const STATUS_UEBERWEISUNG_WIRD_ANGELEGT = "Überweisung wird angelegt";
+const STATUS_UEBERWEISUNG_ANGELEGT = "Überweisung angelegt";
+
+// Alle Status für die manuelle Auswahl (Reihenfolge = Ablauf)
+const STATUS_LISTE = [
+  "Neu",
+  "Genehmigung Vorsitzender",
+  "Genehmigt",
+  "Abgelehnt",
+  STATUS_UEBERWEISUNG_WIRD_ANGELEGT,
+  STATUS_UEBERWEISUNG_ANGELEGT,
+  "Bezahlt",
+  "Gebucht",
+  "Ablage",
+  STATUS_EINNAHME_OFFEN,
+  STATUS_EINNAHME_EINGEGANGEN
+];
+
+// Bei Einnahmen sinnvolle Status
+const STATUS_LISTE_EINNAHME = [
+  STATUS_EINNAHME_OFFEN,
+  STATUS_EINNAHME_EINGEGANGEN,
+  "Gebucht",
+  "Ablage"
+];
+
+// Frühere Status-Namen -> neue Namen (werden einmalig umgestellt)
+const STATUS_UMBENENNUNG = {
+  "Zahlung vorbereitet": STATUS_UEBERWEISUNG_WIRD_ANGELEGT,
+  "Überwiesen": STATUS_UEBERWEISUNG_ANGELEGT
+};
 
 
 
@@ -248,7 +284,47 @@ function ensureColumns(sheet) {
     headerRange.setValues([headers]);
   }
 
+  migrateStatusNames(sheet);
+
   columnsChecked = true;
+
+}
+
+
+// Stellt frühere Status-Namen einmalig auf die neuen Namen um.
+// Ein Merker in den Skripteigenschaften verhindert Wiederholungen.
+function migrateStatusNames(sheet) {
+
+  const props = PropertiesService.getScriptProperties();
+  const key = "statusUmbenennung_v1";
+
+  if (props.getProperty(key)) {
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow >= 2) {
+
+    const range = sheet.getRange(2, COL.STATUS, lastRow - 1, 1);
+    const values = range.getValues();
+    let changed = false;
+
+    values.forEach(function(item) {
+      const neu = STATUS_UMBENENNUNG[String(item[0] || "").trim()];
+      if (neu) {
+        item[0] = neu;
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      range.setValues(values);
+    }
+
+  }
+
+  props.setProperty(key, new Date().toISOString());
 
 }
 
@@ -318,7 +394,7 @@ function isAmountLocked(values) {
   const status = String(values[COL.STATUS - 1] || "");
 
   return [
-    "Überwiesen",
+    STATUS_UEBERWEISUNG_ANGELEGT,
     "Bezahlt",
     "Gebucht",
     STATUS_EINNAHME_EINGEGANGEN
@@ -568,6 +644,18 @@ function getStatusClass(status) {
     s.indexOf("offen") >= 0
   ) {
     return "status-neu";
+  }
+
+  if (
+    s.indexOf("wird angelegt") >= 0
+  ) {
+    return "status-zahlung";
+  }
+
+  if (
+    s.indexOf("überweisung angelegt") >= 0
+  ) {
+    return "status-ueberwiesen";
   }
 
   if (
@@ -1819,7 +1907,12 @@ function buildSepaPayload() {
 
   if (!name || !iban || !purpose) return "";
 
-  const value = Number(String(sepaAmount || "").replace(",", ".").trim());
+  const transferField = document.getElementById("ueberweisungsbetrag");
+  const transfer = transferField ? inputAmount(transferField.value) : null;
+  const value =
+    transfer !== null
+      ? transfer
+      : Number(String(sepaAmount || "").replace(",", ".").trim());
 
   // Aufbau nach EPC-Standard (GiroCode). Der Verwendungszweck
   // gehört in Zeile 11, die Zeilen 9 und 10 bleiben leer.
@@ -1988,9 +2081,70 @@ function collectPaymentData() {
     masterUpdate:
       document.getElementById(
         "masterUpdate"
-      ).checked
+      ).checked,
+
+    ueberweisungsbetrag:
+      document.getElementById(
+        "ueberweisungsbetrag"
+      ).disabled
+        ? null
+        : document.getElementById(
+            "ueberweisungsbetrag"
+          ).value,
+
+    sammel:
+      Array.prototype.map.call(
+        document.querySelectorAll(".sammel-check:checked"),
+        function(box) { return box.value; }
+      )
 
   };
+
+}
+
+
+// Betrag aus Eingabe ("1.041,50" oder "41.5") als Zahl
+function inputAmount(text) {
+
+  let value = String(text || "").trim().split(" ").join("").split("€").join("");
+
+  if (!value) return null;
+
+  if (value.indexOf(",") >= 0) {
+    value = value.split(".").join("").replace(",", ".");
+  }
+
+  const number = Number(value);
+  return isNaN(number) ? null : number;
+
+}
+
+
+function formatAmountInput(number) {
+  return number.toFixed(2).replace(".", ",");
+}
+
+
+// Summe aus eigenem Belegbetrag und ausgewählten Belegen
+function updateSammelSum() {
+
+  const field = document.getElementById("ueberweisungsbetrag");
+
+  if (field.disabled) return;
+
+  const boxes = document.querySelectorAll(".sammel-check:checked");
+
+  if (!boxes.length) {
+    field.value = "";
+  } else {
+    let sum = Number(String(sepaAmount || "0").replace(",", ".")) || 0;
+    Array.prototype.forEach.call(boxes, function(box) {
+      sum += Number(box.getAttribute("data-amount")) || 0;
+    });
+    field.value = formatAmountInput(sum);
+  }
+
+  renderSepaQrCode();
 
 }
 
@@ -2584,6 +2738,48 @@ function chairmanApprovedManuallyConfirmed() {
 }
 
 
+function changeStatusManually() {
+
+  const select = document.getElementById("statusSelect");
+  const neu = select.value;
+  const alt = document.getElementById("statusText").innerText.trim();
+
+  if (!neu || neu === alt) {
+    uiAlert("Bitte einen anderen Status auswählen.");
+    return;
+  }
+
+  uiConfirm({
+    title: "Status ändern?",
+    text:
+      "Status von „" + alt + "“ auf „" + neu + "“ ändern? " +
+      "Es werden keine E-Mails verschickt und keine Daten oder Dateien verändert.",
+    okText: "Status ändern"
+  }).then(function(answer) {
+
+    if (!answer) {
+      return;
+    }
+
+    google.script.run
+
+      .withSuccessHandler(function(result) {
+        document.getElementById("statusText").innerText = result.status;
+        document.getElementById("statusBox").className = "status-box " + result.cssClass;
+        showMessage(result.message);
+      })
+
+      .withFailureHandler(function(error) {
+        alert("Fehler: " + error.message);
+      })
+
+      .setStatusManuallyByRow(rowNumber, neu);
+
+  });
+
+}
+
+
 function chooseAction(
   action
 ) {
@@ -2669,10 +2865,11 @@ Beleg ${htmlEscape(result.values[COL.BELEG_ID - 1] || belegId)}
 
 
 <div
+  id="statusBox"
   class="status-box ${getStatusClass(status)}"
 >
 Status:
-${htmlEscape(status)}
+<span id="statusText">${htmlEscape(status)}</span>
 </div>
 
 
@@ -2862,6 +3059,41 @@ Information zur Überweisung
 
 </div>
 
+
+<div class="form-row">
+
+<div class="form-label">
+Überweisungsbetrag (falls abweichend vom Belegbetrag)
+</div>
+
+<input
+  id="ueberweisungsbetrag"
+  inputmode="decimal"
+  value="${htmlEscape(formatAmountDisplay(row[COL.UEBERWEISUNGSBETRAG - 1]))}"
+  placeholder="leer = Belegbetrag (${htmlEscape(formatAmountDisplay(betrag))} €)"
+  oninput="renderSepaQrCode()"
+  ${isAmountLocked(row) ? "disabled" : ""}
+>
+
+</div>
+
+
+<div class="form-row">
+
+<div class="form-label">
+Gemeinsam überweisen mit …
+</div>
+
+${sammelCandidatesHtml(result.rowNumber)}
+
+<div class="small" style="margin-top:6px;color:#666">
+Die Summe wird automatisch als Überweisungsbetrag eingetragen
+und lässt sich überschreiben. Gespeichert wird mit
+„Zahlungsdaten speichern“.
+</div>
+
+</div>
+
 <div class="section">
 <div class="section-title">SEPA-QR-Code</div>
 <div id="sepaQrCode" style="text-align:center;padding:10px">
@@ -3016,6 +3248,9 @@ ${
 >
 → Nur zur Ablage
 </button>
+
+
+${statusSelectHtml(row)}
 
 
 <button
@@ -3233,6 +3468,372 @@ function belegButtonsHtml(values) {
 
 
 /************************************************************
+ * GEMEINSAME ÜBERWEISUNG (Sammelüberweisung)
+ *
+ * - Überweisungsbetrag (Spalte UEBERWEISUNGSBETRAG) kann vom
+ *   Belegbetrag abweichen; der Belegbetrag bleibt unverändert.
+ * - "Gemeinsam überweisen mit": Beleg-IDs der anderen Belege
+ *   stehen bei jedem Beleg der Gruppe in Spalte
+ *   SAMMELUEBERWEISUNG (Querverweis).
+ * - Der Beleg, auf dem gespeichert wird, trägt die Hinweiszeile
+ *   in "Information zur Überweisung".
+ * - Status bleiben pro Beleg einzeln.
+ ************************************************************/
+
+
+const SAMMEL_PREFIX = "Sammelüberweisung:";
+
+// Status, bei denen ein Beleg nicht mehr zur Auswahl steht
+const SAMMEL_AUSGESCHLOSSEN = [
+  STATUS_UEBERWEISUNG_ANGELEGT,
+  "Bezahlt",
+  "Gebucht",
+  "Abgelehnt",
+  "Ablage",
+  STATUS_EINNAHME_EINGEGANGEN
+];
+
+
+function parseIdList(value) {
+
+  return String(value || "")
+    .split(",")
+    .map(function(id) { return id.trim(); })
+    .filter(String);
+
+}
+
+
+// Betrag, der tatsächlich überwiesen wird
+function effectiveTransferAmount(values) {
+
+  const transfer = amountOrNull(values[COL.UEBERWEISUNGSBETRAG - 1]);
+
+  return transfer !== null ? transfer : values[COL.BETRAG - 1];
+
+}
+
+
+function payeeKey(values) {
+
+  return String(
+    values[COL.ZAHLUNGSEMPFAENGER - 1] ||
+    values[COL.AUSZAHLUNG_AN - 1] ||
+    ""
+  ).trim().toLowerCase();
+
+}
+
+
+function getSammelCandidates(rowNumber) {
+
+  const sheet = getSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return [];
+  }
+
+  const all = sheet.getRange(2, 1, lastRow - 1, COL_MAX).getValues();
+  const self = all[rowNumber - 2];
+  const selfId = String(self[COL.BELEG_ID - 1] || "").trim();
+  const selfPayee = payeeKey(self);
+  const linked = parseIdList(self[COL.SAMMELUEBERWEISUNG - 1]);
+
+  const list = [];
+
+  all.forEach(function(values, index) {
+
+    const id = String(values[COL.BELEG_ID - 1] || "").trim();
+
+    if (!id || index === rowNumber - 2) {
+      return;
+    }
+
+    const isLinked = linked.indexOf(id) >= 0;
+    const otherGroup = parseIdList(values[COL.SAMMELUEBERWEISUNG - 1]);
+
+    if (!isLinked) {
+
+      if (isEinnahme(values)) return;
+      if (SAMMEL_AUSGESCHLOSSEN.indexOf(String(values[COL.STATUS - 1] || "").trim()) >= 0) return;
+
+      // Gehört bereits zu einer anderen Sammelüberweisung
+      if (otherGroup.length && otherGroup.indexOf(selfId) < 0) return;
+
+    }
+
+    const amount = amountOrNull(values[COL.BETRAG - 1]);
+
+    list.push({
+      belegId: id,
+      lieferant: String(values[COL.LIEFERANT - 1] || ""),
+      empfaenger: String(values[COL.ZAHLUNGSEMPFAENGER - 1] || values[COL.AUSZAHLUNG_AN - 1] || ""),
+      betragValue: amount === null ? 0 : amount,
+      betragText: formatAmountDisplay(values[COL.BETRAG - 1]),
+      same: !!selfPayee && payeeKey(values) === selfPayee,
+      checked: isLinked
+    });
+
+  });
+
+  list.sort(function(a, b) {
+    if (a.checked !== b.checked) return a.checked ? -1 : 1;
+    if (a.same !== b.same) return a.same ? -1 : 1;
+    return a.belegId < b.belegId ? -1 : 1;
+  });
+
+  return list;
+
+}
+
+
+function sammelCandidatesHtml(rowNumber) {
+
+  const list = getSammelCandidates(rowNumber);
+
+  if (!list.length) {
+    return "<div class=\"small\" style=\"color:#666\">Keine weiteren offenen Belege vorhanden.</div>";
+  }
+
+  return (
+    "<div style=\"max-height:240px;overflow-y:auto;border:1px solid #ddd;" +
+    "border-radius:7px;background:white;padding:4px 8px\">" +
+    list.map(function(item) {
+      return (
+        "<label style=\"display:block;padding:7px 0;border-bottom:1px solid #eee;cursor:pointer\">" +
+        "<input type=\"checkbox\" class=\"sammel-check\" style=\"width:auto;margin-right:8px\"" +
+        " value=\"" + htmlEscape(item.belegId) + "\"" +
+        " data-amount=\"" + item.betragValue + "\"" +
+        (item.checked ? " checked" : "") +
+        " onchange=\"updateSammelSum()\">" +
+        "<strong>" + htmlEscape(item.belegId) + "</strong> · " +
+        htmlEscape(item.lieferant || "–") + " · " +
+        htmlEscape(item.betragText) + " €" +
+        (item.empfaenger ? " · an " + htmlEscape(item.empfaenger) : "") +
+        (item.same
+          ? " <span style=\"background:#d9ead3;border-radius:5px;padding:1px 6px;font-size:12px\">gleicher Empfänger</span>"
+          : "") +
+        "</label>"
+      );
+    }).join("") +
+    "</div>"
+  );
+
+}
+
+
+function removeSammelLine(text) {
+
+  return String(text || "")
+    .split("\n")
+    .filter(function(line) { return line.indexOf(SAMMEL_PREFIX) !== 0; })
+    .join("\n")
+    .trim();
+
+}
+
+
+// Wird aus savePaymentData aufgerufen. Liefert einen Zusatztext.
+function updateSammelueberweisung(row, belegId, data) {
+
+  const sheet = getSheet();
+  const values = sheet.getRange(row, 1, 1, COL_MAX).getValues()[0];
+  let hint = "";
+
+
+  // Überweisungsbetrag (leer = Belegbetrag)
+  if (data.ueberweisungsbetrag !== undefined && data.ueberweisungsbetrag !== null) {
+
+    if (isAmountLocked(values)) {
+
+      hint += " Der Überweisungsbetrag ist nach der Überweisung gesperrt und wurde nicht geändert.";
+
+    } else {
+
+      const amount = parseAmount(data.ueberweisungsbetrag);
+      const range = sheet.getRange(row, COL.UEBERWEISUNGSBETRAG);
+
+      if (amount === "") {
+        range.clearContent();
+      } else {
+        range.setValue(amount).setNumberFormat(AMOUNT_NUMBER_FORMAT);
+      }
+
+    }
+
+  }
+
+
+  if (!Array.isArray(data.sammel)) {
+    return hint;
+  }
+
+
+  const selected = [];
+
+  data.sammel.forEach(function(id) {
+    id = String(id || "").trim();
+    if (id && id !== belegId && selected.indexOf(id) < 0 && findRowByBelegId(id)) {
+      selected.push(id);
+    }
+  });
+
+  const group = [belegId].concat(selected);
+  const oldOthers = parseIdList(values[COL.SAMMELUEBERWEISUNG - 1]);
+
+
+  // Querverweise in allen Belegen der Gruppe
+  group.forEach(function(id) {
+
+    const r = id === belegId ? row : findRowByBelegId(id);
+
+    if (!r) return;
+
+    const others = selected.length
+      ? group.filter(function(x) { return x !== id; })
+      : [];
+
+    sheet.getRange(r, COL.SAMMELUEBERWEISUNG).setValue(others.join(", "));
+
+    // Hinweiszeile steht nur beim Beleg, auf dem gespeichert wurde
+    if (r !== row) {
+      const infoRange = sheet.getRange(r, COL.INFO_UEBERWEISUNG);
+      infoRange.setValue(removeSammelLine(infoRange.getValue()));
+    }
+
+  });
+
+
+  // Aus der Gruppe entfernte Belege lösen
+  oldOthers.forEach(function(id) {
+
+    if (group.indexOf(id) >= 0) return;
+
+    const r = findRowByBelegId(id);
+
+    if (!r) return;
+
+    sheet.getRange(r, COL.SAMMELUEBERWEISUNG).setValue("");
+
+    const infoRange = sheet.getRange(r, COL.INFO_UEBERWEISUNG);
+    infoRange.setValue(removeSammelLine(infoRange.getValue()));
+
+  });
+
+
+  // Hinweiszeile in "Information zur Überweisung"
+  let info = removeSammelLine(sheet.getRange(row, COL.INFO_UEBERWEISUNG).getValue());
+
+  if (selected.length) {
+
+    const parts =
+      selected.map(function(id) {
+        const r = findRowByBelegId(id);
+        const amount = r ? sheet.getRange(r, COL.BETRAG).getValue() : "";
+        return id + " (" + formatAmountDisplay(amount) + " €)";
+      });
+
+    const total =
+      effectiveTransferAmount(sheet.getRange(row, 1, 1, COL_MAX).getValues()[0]);
+
+    info =
+      (info ? info + "\n" : "") +
+      SAMMEL_PREFIX + " zusammen mit Beleg " + parts.join(", ") +
+      ". Überweisungsbetrag gesamt: " + formatAmountDisplay(total) + " €";
+
+    hint += " Gemeinsame Überweisung mit " + selected.join(", ") + " gespeichert.";
+
+  } else if (oldOthers.length) {
+
+    hint += " Gemeinsame Überweisung aufgehoben.";
+
+  }
+
+  sheet.getRange(row, COL.INFO_UEBERWEISUNG).setValue(info);
+
+  return hint;
+
+}
+
+
+
+/************************************************************
+ * STATUS MANUELL ÄNDERN (1. Kassierer)
+ *
+ * Ändert nur den Status. Keine Mails, keine Daten, keine
+ * Dateien. Nur Status aus STATUS_LISTE (bei Einnahmen aus
+ * STATUS_LISTE_EINNAHME).
+ ************************************************************/
+
+
+function allowedStatusList(values) {
+  return isEinnahme(values) ? STATUS_LISTE_EINNAHME : STATUS_LISTE;
+}
+
+
+function statusSelectHtml(values) {
+
+  const current = String(values[COL.STATUS - 1] || "").trim();
+  const list = allowedStatusList(values).slice();
+
+  // Unbekannten aktuellen Status trotzdem anzeigen
+  if (current && list.indexOf(current) < 0) {
+    list.unshift(current);
+  }
+
+  const options =
+    list.map(function(status) {
+      return (
+        "<option value=\"" + htmlEscape(status) + "\"" +
+        (status === current ? " selected" : "") +
+        ">" + htmlEscape(status) + "</option>"
+      );
+    }).join("");
+
+  return (
+    "<div class=\"form-row\" style=\"margin-top:20px\">" +
+    "<div class=\"form-label\">Status manuell ändern</div>" +
+    "<select id=\"statusSelect\">" + options + "</select>" +
+    "</div>" +
+    "<button class=\"button secondary-button\" onclick=\"changeStatusManually()\">" +
+    "Status ändern</button>"
+  );
+
+}
+
+
+function setStatusManuallyByRow(rowNumber, newStatus) {
+
+  const sheet = getSheet();
+  const n = Number(rowNumber);
+
+  getBelegIdFromRow(n);
+
+  const values = sheet.getRange(n, 1, 1, COL_MAX).getValues()[0];
+  const status = String(newStatus || "").trim();
+
+  if (allowedStatusList(values).indexOf(status) < 0) {
+    throw new Error("Dieser Status ist nicht erlaubt: " + status);
+  }
+
+  const old = String(values[COL.STATUS - 1] || "").trim();
+
+  sheet.getRange(n, COL.STATUS).setValue(status);
+  sheet
+    .getRange(n, COL.LETZTE_BEARBEITUNG)
+    .setValue("Status manuell geändert: " + (old || "–") + " → " + status);
+
+  return {
+    status: status,
+    cssClass: getStatusClass(status),
+    message: "Der Status wurde auf „" + status + "“ geändert."
+  };
+
+}
+
+
+/************************************************************
  * TABELLENZEILEN VORGANGSART / ZUSATZANGABEN
  ************************************************************/
 
@@ -3247,6 +3848,11 @@ function vorgangRowsHtml(values) {
     htmlEscape(getVorgangsart(values)) +
     (isEinnahme(values) ? " <strong>(Einnahme)</strong>" : "") +
     "</td></tr>" +
+    (String(values[COL.SAMMELUEBERWEISUNG - 1] || "").trim()
+      ? "<tr><td class=\"label\">Sammelüberweisung mit</td><td>" +
+        htmlEscape(values[COL.SAMMELUEBERWEISUNG - 1]) +
+        "</td></tr>"
+      : "") +
     (zusatz
       ? "<tr><td class=\"label\">Zusatzangaben</td><td>" +
         htmlEscape(zusatz).split("\n").join("<br>") +
@@ -3772,8 +4378,13 @@ function savePaymentData(
   }
 
 
+  const sammelHint =
+    updateSammelueberweisung(row, belegId, data);
+
+
   return (
-    "Zahlungsdaten wurden gespeichert."
+    "Zahlungsdaten wurden gespeichert." +
+    sammelHint
   );
 
 }
@@ -4021,7 +4632,7 @@ function sendToSecondCashier(
         row,
         1,
         1,
-        COL.INTERNE_ID
+        COL_MAX
       )
       .getValues()[0];
 
@@ -4091,7 +4702,7 @@ function sendToSecondCashier(
       COL.STATUS
     )
     .setValue(
-      "Zahlung vorbereitet"
+      STATUS_UEBERWEISUNG_WIRD_ANGELEGT
     );
 
 
@@ -4147,7 +4758,17 @@ function sendToSecondCashier(
     (
       rechnungsnummer || "-"
     ) +
-    "\n\n" +
+    "\n" +
+
+    "Überweisungsbetrag: " +
+    formatAmountDisplay(effectiveTransferAmount(data)) +
+    " €\n" +
+
+    (String(data[COL.SAMMELUEBERWEISUNG - 1] || "").trim()
+      ? "Gemeinsam mit Beleg: " + data[COL.SAMMELUEBERWEISUNG - 1] + "\n"
+      : "") +
+
+    "\n" +
 
     "Bitte die Überweisung bearbeiten:\n" +
     url;
@@ -4384,6 +5005,37 @@ const rowNumber =
   ${jsonForHtml(result.rowNumber)};
 
 
+function markAsPaidByChairman() {
+
+  const date = document.getElementById("bezahltDatum").value;
+  const button = document.getElementById("paidButton");
+
+  if (!date) {
+    uiAlert("Bitte ein Datum eintragen.");
+    return;
+  }
+
+  button.disabled = true;
+
+  google.script.run
+
+    .withSuccessHandler(function(result) {
+      button.disabled = false;
+      const box = document.getElementById("paidMessage");
+      box.innerText = "✅ " + result;
+      box.style.display = "block";
+    })
+
+    .withFailureHandler(function(error) {
+      button.disabled = false;
+      alert("Fehler: " + error.message);
+    })
+
+    .markAsPaidByRow(rowNumber, date);
+
+}
+
+
 function chairmanDecision(
   decision
 ) {
@@ -4606,6 +5258,34 @@ ${htmlEscape(genehmigungDatum)}
 class="message"
 style="display:none">
 </div>
+
+</div>
+
+
+<div class="section">
+
+<div class="section-title">
+Zahlung
+</div>
+
+<div class="form-row">
+<div class="form-label">Bezahlt am</div>
+<input
+  type="date"
+  id="bezahltDatum"
+  value="${htmlDateValue(row[COL.BEZAHLT_AM - 1] || new Date())}"
+>
+</div>
+
+<button
+  id="paidButton"
+  class="button payment-button"
+  onclick="markAsPaidByChairman()"
+>
+✓ Als bezahlt markieren
+</button>
+
+<div id="paidMessage" class="message" style="display:none"></div>
 
 </div>
 
@@ -4906,7 +5586,7 @@ ${commonCss()}
 <script>
 const sepaPaymentPayload =
   ${jsonForHtml(
-    buildSepaQrPayload(recipient, iban, bic, betrag, paymentPurpose)
+    buildSepaQrPayload(recipient, iban, bic, effectiveTransferAmount(row), paymentPurpose)
   )};
 
 function renderPaymentQr() {
@@ -5107,8 +5787,17 @@ Zahlungsdaten
 </tr>
 
 <tr>
-<td class="label">Betrag</td>
-<td>${htmlEscape(formatAmountDisplay(betrag))} €</td>
+<td class="label">Überweisungsbetrag</td>
+<td><strong>${htmlEscape(formatAmountDisplay(effectiveTransferAmount(row)))} €</strong>${
+  amountOrNull(row[COL.UEBERWEISUNGSBETRAG - 1]) !== null
+    ? "<br><span style=\"font-size:13px;color:#666\">Belegbetrag: " +
+      htmlEscape(formatAmountDisplay(betrag)) + " €" +
+      (String(row[COL.SAMMELUEBERWEISUNG - 1] || "").trim()
+        ? " · gemeinsam mit " + htmlEscape(row[COL.SAMMELUEBERWEISUNG - 1])
+        : "") +
+      "</span>"
+    : ""
+}</td>
 </tr>
 
 <tr>
@@ -5174,7 +5863,7 @@ style="display:none">
 
 
 ${
-  status === "Zahlung vorbereitet"
+  status === STATUS_UEBERWEISUNG_WIRD_ANGELEGT
     ? `
 <button
   id="transferButton"
@@ -5191,7 +5880,7 @@ ${
 
 <br>
 
-Überwiesen am:
+Überweisung angelegt am:
 ${htmlEscape(ueberwiesenAm)}
 
 </div>
@@ -5293,7 +5982,7 @@ function transferDone(
       COL.STATUS
     )
     .setValue(
-      "Überwiesen"
+      STATUS_UEBERWEISUNG_ANGELEGT
     );
 
 
