@@ -41,6 +41,9 @@ const CONFIG = {
   // Originaldateien, die über "Neuer Vorgang" hochgeladen werden
   BELEG_ORDNER_ORIGINALE: "Originale Eingabeseite",
 
+  ICON_URL:
+    "https://www.neuenhof-koeln.de/wp-content/uploads/2023/02/kgv-neuenhof-logo.png",
+
   WEBAPP_URL:
     "https://script.google.com/a/macros/neuenhof-koeln.de/s/AKfycbyrWdMOXVOFDA0Z9hA3OCq9gZZzbc1tW1jfQeKaEIp1GNwAc3vhsllXYuuELDy5dFAk/exec",
 
@@ -112,12 +115,13 @@ const COL = {
 
   VORGANGSART: 36,
   ZUSATZANGABEN: 37,
-  EINNAHME: 38
+  EINNAHME: 38,
+  MTV_BUCHUNGSNUMMER: 39
 
 };
 
 // Höchste vom Skript genutzte Spalte
-const COL_MAX = 38;
+const COL_MAX = 39;
 
 // Neue Spalten bekommen beim ersten Zugriff eine Überschrift.
 const COL_HEADERS = {
@@ -125,7 +129,8 @@ const COL_HEADERS = {
   35: "Belegkopie (Drive-IDs)",
   36: "Vorgangsart",
   37: "Zusatzangaben",
-  38: "Einnahme"
+  38: "Einnahme",
+  39: "MTV Buchungsnummer"
 };
 
 const VORGANGSARTEN = [
@@ -646,13 +651,21 @@ function onFormSubmit(e) {
       )
       .getValue();
 
-  const amount =
+  let amount =
     sheet
       .getRange(
         row,
         COL.BETRAG
       )
       .getValue();
+
+  // "16" oder "16,5" aus dem Formular als Zahl 16,00 / 16,50 speichern
+  const amountNumber = amountOrNull(amount);
+
+  if (amountNumber !== null) {
+    writeAmount(sheet, row, amountNumber);
+    amount = amountNumber;
+  }
 
   const purpose =
     sheet
@@ -859,7 +872,7 @@ function onFormSubmit(e) {
     "\n" +
 
     "Betrag: " +
-    amount +
+    formatAmountDisplay(amount) +
     " €\n" +
 
     "Verwendungszweck: " +
@@ -884,6 +897,22 @@ function onFormSubmit(e) {
 
 
 function doGet(e) {
+
+  const output = routeRequest(e);
+
+  // Vereinslogo als Seitensymbol (auch für "Zum Startbildschirm hinzufügen")
+  try {
+    output.setFaviconUrl(CONFIG.ICON_URL);
+  } catch (error) {
+    Logger.log("Favicon: " + error);
+  }
+
+  return output;
+
+}
+
+
+function routeRequest(e) {
 
   const params =
     e &&
@@ -1029,6 +1058,8 @@ function createStartPage() {
 
 <head>
 
+${dialogKit()}
+
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
 
@@ -1094,6 +1125,212 @@ Belegübersicht öffnen
 </body>
 
 </html>
+
+`;
+
+}
+
+
+/************************************************************
+ * DIALOGFENSTER (statt Browser-Meldungen)
+ *
+ * Wird in den <head> jeder Seite eingefügt.
+ * - uiConfirm({title, text, okText, danger}) -> Promise<boolean>
+ * - uiAlert(text, title)
+ * - window.alert wird auf uiAlert umgeleitet, damit Fehler-
+ *   meldungen nicht als Browser-Fenster mit Google-Adresse
+ *   erscheinen.
+ *
+ * Keine Backslashes verwenden: der Text steht in einem
+ * Template-String.
+ ************************************************************/
+
+
+function dialogKit() {
+
+  return `
+
+<style>
+
+.ui-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 1000;
+}
+
+.ui-dialog {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.3);
+  max-width: 460px;
+  width: 100%;
+  padding: 22px;
+  font-family: Arial, sans-serif;
+}
+
+.ui-dialog h2 {
+  margin: 0 0 12px 0;
+  font-size: 20px;
+}
+
+.ui-dialog .ui-text {
+  line-height: 1.45;
+  color: #333;
+}
+
+.ui-dialog.ui-error h2 {
+  color: #c5221f;
+}
+
+.ui-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.ui-actions button {
+  border: none;
+  border-radius: 8px;
+  padding: 11px 18px;
+  font-size: 15px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.ui-cancel {
+  background: #e8eaed;
+  color: #222;
+}
+
+.ui-ok {
+  background: #1769aa;
+  color: white;
+}
+
+.ui-ok.ui-danger {
+  background: #c5221f;
+}
+
+</style>
+
+<script>
+
+function uiDialog(options) {
+
+  return new Promise(function(resolve) {
+
+    const overlay = document.createElement("div");
+    overlay.className = "ui-overlay";
+
+    const box = document.createElement("div");
+    box.className = "ui-dialog" + (options.error ? " ui-error" : "");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h2");
+    title.textContent = options.title || "";
+
+    const text = document.createElement("div");
+    text.className = "ui-text";
+
+    if (options.html) {
+      text.innerHTML = options.html;
+    } else {
+      text.textContent = options.text || "";
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "ui-actions";
+
+    function close(result) {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(result);
+    }
+
+    function onKey(event) {
+      if (event.key === "Escape") {
+        close(false);
+      }
+    }
+
+    let cancel = null;
+
+    if (options.cancelText) {
+      cancel = document.createElement("button");
+      cancel.className = "ui-cancel";
+      cancel.textContent = options.cancelText;
+      cancel.onclick = function() { close(false); };
+      actions.appendChild(cancel);
+    }
+
+    const ok = document.createElement("button");
+    ok.className = "ui-ok" + (options.danger ? " ui-danger" : "");
+    ok.textContent = options.okText || "OK";
+    ok.onclick = function() { close(true); };
+    actions.appendChild(ok);
+
+    box.appendChild(title);
+    box.appendChild(text);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+
+    overlay.addEventListener("click", function(event) {
+      if (event.target === overlay) {
+        close(false);
+      }
+    });
+
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+
+    // Bei Rückfragen ist "Abbrechen" vorausgewählt
+    (cancel || ok).focus();
+
+  });
+
+}
+
+
+function uiConfirm(options) {
+  return uiDialog({
+    title: options.title,
+    text: options.text,
+    html: options.html,
+    okText: options.okText || "OK",
+    cancelText: options.cancelText || "Abbrechen",
+    danger: options.danger
+  });
+}
+
+
+function uiAlert(message, title) {
+
+  const text = String(message === undefined || message === null ? "" : message);
+  const isError = text.indexOf("Fehler") === 0;
+
+  return uiDialog({
+    title: title || (isError ? "Das hat nicht geklappt" : "Hinweis"),
+    text: isError ? text.replace("Fehler: ", "") : text,
+    okText: "OK",
+    error: isError
+  });
+
+}
+
+
+window.alert = function(message) {
+  uiAlert(message);
+};
+
+</script>
 
 `;
 
@@ -1506,6 +1743,8 @@ function createDetailPage(
 
 <head>
 
+${dialogKit()}
+
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
 
@@ -1624,6 +1863,15 @@ function renderSepaQrCode() {
     encodeURIComponent(payload) +
     "&size=320'>" +
     "<div class='small' style='margin-top:8px'>SEPA-Überweisungsdaten</div>";
+}
+
+
+function updateMtvCell() {
+  const cell = document.getElementById("cell_mtv");
+  const input = document.getElementById("mtvNummer");
+  if (cell && input) {
+    cell.innerText = input.value.trim();
+  }
 }
 
 
@@ -2066,6 +2314,8 @@ function editAccountingDates() {
     .withSuccessHandler(
       function(result) {
 
+        updateMtvCell();
+
         showMessage(
           result
         );
@@ -2086,7 +2336,11 @@ function editAccountingDates() {
 
     .setAccountingDatesByRow(
       rowNumber,
-      {bezahlt: bezahlt, gebucht: gebucht}
+      {
+        bezahlt: bezahlt,
+        gebucht: gebucht,
+        mtv: document.getElementById("mtvNummer").value
+      }
     );
 
 }
@@ -2164,6 +2418,8 @@ function markAsBooked() {
     .withSuccessHandler(
       function(result) {
 
+        updateMtvCell();
+
         showMessage(
           result
         );
@@ -2184,7 +2440,8 @@ function markAsBooked() {
 
     .markAsBookedByRow(
       rowNumber,
-      date
+      date,
+      document.getElementById("mtvNummer").value
     );
 
 }
@@ -2192,18 +2449,24 @@ function markAsBooked() {
 
 function deleteBeleg() {
 
-  const answer =
-    confirm(
-      "Wirklich löschen?\\n\\n" +
-      "Der Beleg " +
-      belegId +
-      " wird aus der Belegliste gelöscht."
-    );
+  uiConfirm({
+    title: "🗑️ Beleg " + belegId + " löschen?",
+    html:
+      "Der Beleg wird aus der Belegliste entfernt. " +
+      "Die Belegkopie wird nach <em>Belegeingang/Gelöscht</em> verschoben." +
+      "<br><br><strong>Das kann nicht rückgängig gemacht werden.</strong>",
+    okText: "Endgültig löschen",
+    danger: true
+  }).then(function(answer) {
+    if (answer) {
+      deleteBelegConfirmed();
+    }
+  });
+
+}
 
 
-  if (!answer) {
-    return;
-  }
+function deleteBelegConfirmed() {
 
 
   const button =
@@ -2223,16 +2486,16 @@ function deleteBeleg() {
     .withSuccessHandler(
       function(result) {
 
-        document.body.innerHTML =
-          "<div style='font-family:Arial;padding:30px;text-align:center'>" +
-          "<h1>Beleg gelöscht</h1>" +
-          "<p>" +
+        document.querySelector(".container").innerHTML =
+          "<h1>🗑️ Beleg gelöscht</h1>" +
+          "<div class='message'>✅ " +
           escapeHtml(result) +
-          "</p>" +
-          "<a href='" +
+          "</div>" +
+          "<a class='button back-button' href='" +
           "${CONFIG.WEBAPP_URL}?uebersicht=1" +
-          "' target='_blank'>Zur Belegübersicht</a>" +
-          "</div>";
+          "' target='_blank'>← Zur Belegübersicht</a>";
+
+        window.scrollTo(0, 0);
 
       }
     )
@@ -2263,9 +2526,22 @@ function deleteBeleg() {
 
 function chairmanApprovedManually() {
 
-  if (!confirm("Eintragen, dass der 1. Vorsitzende diesen Beleg genehmigt hat?")) {
-    return;
-  }
+  uiConfirm({
+    title: "Genehmigung eintragen?",
+    text:
+      "Eintragen, dass der 1. Vorsitzende den Beleg " + belegId +
+      " genehmigt hat? Der Vorsitzende bekommt keine E-Mail.",
+    okText: "Genehmigung eintragen"
+  }).then(function(answer) {
+    if (answer) {
+      chairmanApprovedManuallyConfirmed();
+    }
+  });
+
+}
+
+
+function chairmanApprovedManuallyConfirmed() {
 
   const button =
     document.getElementById(
@@ -2460,19 +2736,7 @@ ${formDataEditorHtml(row)}
 
 
 
-${
-  upload
-    ? `
-<a
-  class="button document-button"
-  href="${htmlEscape(upload)}"
-  target="_blank"
->
-📄 Rechnung / Originalbeleg öffnen
-</a>
-`
-    : ""
-}
+${belegButtonsHtml(row)}
 
 
 <div class="section">
@@ -2706,14 +2970,6 @@ ${
 }
 
 
-<div class="warning">
-
-Die Bearbeitungsbuttons bleiben für den 1. Kassierer
-auch bei laufender Genehmigung oder Überweisung sichtbar.
-
-</div>
-
-
 ${
   einnahme
     ? `
@@ -2827,6 +3083,15 @@ ${htmlEscape(gebuchtAm)}
 </td>
 </tr>
 
+<tr>
+<td class="label">
+MTV Buchungsnummer
+</td>
+<td id="cell_mtv">
+${htmlEscape(row[COL.MTV_BUCHUNGSNUMMER - 1])}
+</td>
+</tr>
+
 </table>
 
 
@@ -2855,6 +3120,21 @@ Gebucht am
   type="date"
   id="gebuchtDatum"
   value="${htmlDateValue(row[COL.GEBUCHT_AM - 1])}"
+>
+
+</div>
+
+
+<div class="form-row">
+
+<div class="form-label">
+MTV Buchungsnummer
+</div>
+
+<input
+  id="mtvNummer"
+  value="${htmlEscape(row[COL.MTV_BUCHUNGSNUMMER - 1])}"
+  placeholder="optional"
 >
 
 </div>
@@ -2902,6 +3182,52 @@ ${einnahme ? "✓ Zahlung eingegangen" : "✓ Als bezahlt markieren"}
 </html>
 
 `;
+
+}
+
+
+/************************************************************
+ * BUTTONS "BELEG ÖFFNEN"
+ *
+ * Öffnet die Kopie im Ordner "Belegeingang". Die Datei-ID
+ * bleibt beim Verschieben (Bezahlt/Gebucht) gleich, der Link
+ * wandert also mit. Ältere Belege ohne Kopie: Original.
+ * Bei mehreren Dateien ein Button pro Datei.
+ ************************************************************/
+
+
+function belegButtonsHtml(values) {
+
+  let ids =
+    String(values[COL.BELEGKOPIE_ID - 1] || "")
+      .split(",")
+      .map(function(id) { return id.trim(); })
+      .filter(String);
+
+  if (!ids.length) {
+    ids = extractDriveFileIds(values[COL.UPLOAD - 1]);
+  }
+
+  const links =
+    ids.map(function(id) {
+      return "https://drive.google.com/open?id=" + encodeURIComponent(id);
+    });
+
+  // Upload ohne erkennbare Drive-ID: Link unverändert verwenden
+  const upload = String(values[COL.UPLOAD - 1] || "").trim();
+
+  if (!links.length && /^https?:/.test(upload)) {
+    links.push(upload);
+  }
+
+  return links.map(function(link, index) {
+    return (
+      "<a class=\"button document-button\" href=\"" + htmlEscape(link) +
+      "\" target=\"_blank\">📄 Beleg öffnen" +
+      (links.length > 1 ? " (" + (index + 1) + ")" : "") +
+      "</a>"
+    );
+  }).join("");
 
 }
 
@@ -3068,10 +3394,11 @@ function markAsPaidByRow(rowNumber, dateString) {
   );
 }
 
-function markAsBookedByRow(rowNumber, dateString) {
+function markAsBookedByRow(rowNumber, dateString, mtvNummer) {
   return markAsBooked(
     getBelegIdFromRow(rowNumber),
-    String(dateString || "")
+    String(dateString || ""),
+    mtvNummer
   );
 }
 
@@ -3080,7 +3407,8 @@ function setAccountingDatesByRow(rowNumber, data) {
   return setAccountingDates(
     getBelegIdFromRow(rowNumber),
     String(payload.bezahlt || ""),
-    String(payload.gebucht || "")
+    String(payload.gebucht || ""),
+    payload.mtv
   );
 }
 
@@ -3112,9 +3440,9 @@ function performButtonAction(rowNumber, action, payload) {
     case "markAsPaid":
       return markAsPaid(actualBelegId, String(payload || ""));
     case "markAsBooked":
-      return markAsBooked(actualBelegId, String(payload || ""));
+      return markAsBooked(actualBelegId, String(payload || ""), "");
     case "setAccountingDates":
-      return setAccountingDates(actualBelegId, payload && payload.bezahlt, payload && payload.gebucht);
+      return setAccountingDates(actualBelegId, payload && payload.bezahlt, payload && payload.gebucht, payload && payload.mtv);
     case "deleteBeleg":
       return deleteBeleg(actualBelegId);
     default:
@@ -3912,7 +4240,7 @@ function sendChairmanApprovalMail(
     "\n" +
 
     "Betrag: " +
-    amount +
+    formatAmountDisplay(amount) +
     " €\n\n" +
 
     "Beleg prüfen und entscheiden:\n" +
@@ -4033,6 +4361,8 @@ function createChairmanPage(
 <html>
 
 <head>
+
+${dialogKit()}
 
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
@@ -4209,19 +4539,7 @@ ${formDataEditorHtml(row)}
 
 
 
-${
-  upload
-    ? `
-<a
-  class="button document-button"
-  href="${htmlEscape(upload)}"
-  target="_blank"
->
-📄 Rechnung / Originalbeleg öffnen
-</a>
-`
-    : ""
-}
+${belegButtonsHtml(row)}
 
 
 <div class="section">
@@ -4572,6 +4890,8 @@ function createPaymentPage(
 
 <head>
 
+${dialogKit()}
+
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
 
@@ -4739,7 +5059,7 @@ ${vorgangRowsHtml(row)}
 
 <tr>
 <td class="label">Betrag</td>
-<td>${htmlEscape(betrag)} €</td>
+<td>${htmlEscape(formatAmountDisplay(betrag))} €</td>
 </tr>
 
 <tr>
@@ -4760,19 +5080,7 @@ ${vorgangRowsHtml(row)}
 </table>
 
 
-${
-  upload
-    ? `
-<a
-  class="button document-button"
-  href="${htmlEscape(upload)}"
-  target="_blank"
->
-📄 Rechnung / Originalbeleg öffnen
-</a>
-`
-    : ""
-}
+${belegButtonsHtml(row)}
 
 
 <div class="section">
@@ -4800,7 +5108,7 @@ Zahlungsdaten
 
 <tr>
 <td class="label">Betrag</td>
-<td>${htmlEscape(betrag)} €</td>
+<td>${htmlEscape(formatAmountDisplay(betrag))} €</td>
 </tr>
 
 <tr>
@@ -5160,7 +5468,8 @@ function markAsPaid(
 
 function markAsBooked(
   belegId,
-  dateString
+  dateString,
+  mtvNummer
 ) {
 
   const sheet =
@@ -5207,6 +5516,16 @@ function markAsBooked(
     );
 
 
+  // MTV Buchungsnummer ist freiwillig; nur eintragen, wenn angegeben
+  const mtv = String(mtvNummer || "").trim();
+
+  if (mtv) {
+    sheet
+      .getRange(row, COL.MTV_BUCHUNGSNUMMER)
+      .setValue(mtv);
+  }
+
+
   sheet
     .getRange(
       row,
@@ -5219,6 +5538,7 @@ function markAsBooked(
 
   return (
     "Der Beleg wurde als gebucht markiert. " +
+    (mtv ? "MTV Buchungsnummer: " + mtv + ". " : "") +
     "Buchungsdatum: " +
     Utilities.formatDate(
       date,
@@ -5239,7 +5559,8 @@ function markAsBooked(
 function setAccountingDates(
   belegId,
   bezahltString,
-  gebuchtString
+  gebuchtString,
+  mtvNummer
 ) {
 
   const sheet =
@@ -5310,6 +5631,15 @@ function setAccountingDates(
       )
       .clearContent();
 
+  }
+
+
+  // MTV Buchungsnummer: wird so gespeichert, wie sie im Feld steht
+  // (auch leer, damit eine falsche Nummer entfernt werden kann)
+  if (mtvNummer !== undefined && mtvNummer !== null) {
+    sheet
+      .getRange(row, COL.MTV_BUCHUNGSNUMMER)
+      .setValue(String(mtvNummer).trim());
   }
 
 
@@ -5748,15 +6078,71 @@ const EDIT_FIELDS = [
 ];
 
 
+// Betrag für die Anzeige: 1234.5 -> "1.234,50".
+// Auch alte Texteinträge wie "8.25 EU" werden lesbar dargestellt.
+// Nicht lesbare Texte bleiben unverändert.
 function formatAmountDisplay(value) {
 
   if (value === "" || value === null || value === undefined) {
     return "";
   }
 
-  return typeof value === "number"
-    ? value.toFixed(2).replace(".", ",")
-    : String(value);
+  const number = amountOrNull(value);
+
+  if (number === null) {
+    return String(value);
+  }
+
+  const parts = number.toFixed(2).split(".");
+
+  return (
+    parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".") +
+    "," +
+    parts[1]
+  );
+
+}
+
+
+// Betrag als Zahl oder null, tolerant gegenüber Zusätzen wie "EU", "€".
+function amountOrNull(value) {
+
+  if (typeof value === "number") {
+    return value;
+  }
+
+  const cleaned =
+    String(value === null || value === undefined ? "" : value)
+      .replace(/[^\d,.-]/g, "");
+
+  if (!cleaned) {
+    return null;
+  }
+
+  try {
+    const number = parseAmount(cleaned);
+    return number === "" ? null : number;
+  } catch (e) {
+    return null;
+  }
+
+}
+
+
+const AMOUNT_NUMBER_FORMAT = '#,##0.00 "€"';
+
+
+// Betrag in die Tabelle schreiben: als Zahl mit Euro-Format,
+// sonst unverändert.
+function writeAmount(sheet, row, value) {
+
+  const range = sheet.getRange(row, COL.BETRAG);
+
+  if (typeof value === "number") {
+    range.setValue(value).setNumberFormat(AMOUNT_NUMBER_FORMAT);
+  } else {
+    range.setValue(value);
+  }
 
 }
 
@@ -5968,7 +6354,7 @@ function saveFormDataByRow(rowNumber, data) {
 
     if (field.id === "betrag") {
       if (amountChanged) {
-        sheet.getRange(n, field.col).setValue(newAmount);
+        writeAmount(sheet, n, newAmount);
       }
       return;
     }
@@ -6083,6 +6469,8 @@ function createNewEntryPage() {
 <html>
 
 <head>
+
+${dialogKit()}
 
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
@@ -6692,6 +7080,8 @@ function createManualEntry(data) {
       .getRange(row, 1, 1, COL_MAX)
       .setValues([values]);
 
+    writeAmount(sheet, row, betrag);
+
   } finally {
 
     lock.releaseLock();
@@ -6735,6 +7125,8 @@ function createOverviewPage() {
 
 <head>
 
+${dialogKit()}
+
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
 
@@ -6748,22 +7140,114 @@ ${commonCss()}
   margin-bottom: 20px;
 }
 
-.overview-table {
-  overflow-x: auto;
+/* Die Übersicht darf breiter sein als die Detailseiten */
+.container {
+  max-width: 1400px;
 }
 
 .overview-table table {
-  min-width: 850px;
+  width: 100%;
+}
+
+.overview-table td,
+.overview-table th {
+  padding: 9px 8px;
+}
+
+.overview-table tbody tr {
+  cursor: pointer;
+}
+
+.overview-table tbody tr:hover {
+  background: #f1f6fb;
+}
+
+.amount {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.time {
+  font-size: 12px;
+  color: #777;
 }
 
 .open-button {
   display: inline-block;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: #1769aa;
   color: white;
   border-radius: 6px;
   text-decoration: none;
   font-weight: bold;
+  white-space: nowrap;
+}
+
+/* Handy: jeder Beleg als Karte statt Tabellenzeile */
+@media (max-width: 700px) {
+
+  body {
+    padding: 10px;
+  }
+
+  .container {
+    padding: 16px;
+  }
+
+  .overview-table thead {
+    display: none;
+  }
+
+  .overview-table table,
+  .overview-table tbody,
+  .overview-table tr,
+  .overview-table td {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .overview-table tr {
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: white;
+  }
+
+  .overview-table td {
+    border: none;
+    padding: 4px 0;
+    text-align: left;
+  }
+
+  .overview-table td::before {
+    content: attr(data-label);
+    display: inline-block;
+    min-width: 95px;
+    font-weight: bold;
+    color: #555;
+  }
+
+  .overview-table td.amount {
+    text-align: left;
+  }
+
+  .overview-table td.action::before {
+    content: "";
+    min-width: 0;
+  }
+
+  .overview-table td.action .open-button {
+    display: block;
+    text-align: center;
+    margin-top: 6px;
+  }
+
 }
 
 select {
@@ -6892,8 +7376,8 @@ function renderTable() {
         currentSort === "amount"
       ) {
 
-        av = Number(a.betrag) || 0;
-        bv = Number(b.betrag) || 0;
+        av = a.betragValue === null ? -1 : a.betragValue;
+        bv = b.betragValue === null ? -1 : b.betragValue;
 
       } else if (
         currentSort === "art"
@@ -6957,57 +7441,62 @@ function renderTable() {
         );
 
 
-      tr.innerHTML =
-
-        "<td>" +
-        escapeHtml(item.belegId) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.timestamp) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.vorgangsart) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.einreicher) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.gekauft) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.lieferant) +
-        "</td>" +
-
-        "<td>" +
-        escapeHtml(item.betrag) +
-        " €</td>" +
-
-        "<td>" +
-        escapeHtml(item.status) +
-        "</td>" +
-
-        "<td>" +
-
-        "<a " +
-        "class='open-button' " +
-        "href='" +
+      const url =
         "${CONFIG.WEBAPP_URL}?key=" +
         encodeURIComponent(
           item.internalId
-        ) +
-        "' " +
-        "target='_blank'>" +
+        );
 
+      tr.innerHTML =
+
+        "<td data-label='Beleg-ID' class='nowrap'>" +
+        escapeHtml(item.belegId) +
+        "</td>" +
+
+        "<td data-label='Datum'>" +
+        "<span class='nowrap'>" + escapeHtml(item.datum) + "</span>" +
+        (item.uhrzeit
+          ? " <span class='time'>" + escapeHtml(item.uhrzeit) + "</span>"
+          : "") +
+        "</td>" +
+
+        "<td data-label='Vorgang'>" +
+        escapeHtml(item.vorgangsart) +
+        "</td>" +
+
+        "<td data-label='Einreicher'>" +
+        escapeHtml(item.einreicher) +
+        "</td>" +
+
+        "<td data-label='Gekauft'>" +
+        escapeHtml(item.gekauft) +
+        "</td>" +
+
+        "<td data-label='Lieferant'>" +
+        escapeHtml(item.lieferant) +
+        "</td>" +
+
+        "<td data-label='Betrag' class='amount'>" +
+        (item.betragText ? escapeHtml(item.betragText) + " €" : "") +
+        "</td>" +
+
+        "<td data-label='Status'>" +
+        escapeHtml(item.status) +
+        "</td>" +
+
+        "<td class='action'>" +
+        "<a class='open-button' href='" + url + "' target='_blank'>" +
         "📄 Öffnen" +
-
         "</a>" +
-
         "</td>";
+
+
+      // Ganze Zeile anklickbar
+      tr.onclick = function(event) {
+        if (!event.target.closest("a")) {
+          window.open(url, "_blank");
+        }
+      };
 
 
       tbody.appendChild(
@@ -7145,7 +7634,7 @@ Belegübersicht KGV Neuenhof
 
 <input
   id="search"
-  placeholder="Suche nach Beleg-ID, Datum, Einreicher, Einkauf, Zweck, Lieferant, Betrag oder Status"
+  placeholder="Suche nach Beleg-ID, Datum, Einreicher, Einkauf, Zweck, Lieferant, Betrag, Status oder MTV-Nummer"
   oninput="renderTable()"
 />
 
@@ -7238,7 +7727,7 @@ Lieferant
 
 <th
 onclick="sortBy('amount')"
-style="cursor:pointer"
+style="cursor:pointer;text-align:right"
 >
 Betrag
 </th>
@@ -7389,10 +7878,43 @@ function getOverviewData() {
               ] || ""
             ),
 
-          betrag:
-            row[
-              COL.BETRAG - 1
-            ],
+          betragText:
+            formatAmountDisplay(
+              row[
+                COL.BETRAG - 1
+              ]
+            ),
+
+          betragValue:
+            amountOrNull(
+              row[
+                COL.BETRAG - 1
+              ]
+            ),
+
+          datum:
+            formatDate(
+              row[
+                COL.ZEITSTEMPEL - 1
+              ]
+            ),
+
+          uhrzeit:
+            row[COL.ZEITSTEMPEL - 1]
+              ? Utilities.formatDate(
+                  new Date(row[COL.ZEITSTEMPEL - 1]),
+                  Session.getScriptTimeZone(),
+                  "HH:mm"
+                )
+              : "",
+
+          // nur für die Suche, keine eigene Spalte
+          mtvBuchungsnummer:
+            String(
+              row[
+                COL.MTV_BUCHUNGSNUMMER - 1
+              ] || ""
+            ),
 
           status:
             String(
@@ -7427,6 +7949,8 @@ function createChairmanOverviewPage() {
 <html>
 
 <head>
+
+${dialogKit()}
 
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
@@ -7655,9 +8179,11 @@ function getChairmanOverviewData() {
             ],
 
           betrag:
-            row[
-              COL.BETRAG - 1
-            ],
+            formatAmountDisplay(
+              row[
+                COL.BETRAG - 1
+              ]
+            ),
 
           status:
             row[
@@ -7686,6 +8212,8 @@ function createPaymentOverview() {
 <html>
 
 <head>
+
+${dialogKit()}
 
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
@@ -7910,9 +8438,11 @@ function getPaymentOverviewData() {
             ],
 
           betrag:
-            row[
-              COL.BETRAG - 1
-            ],
+            formatAmountDisplay(
+              row[
+                COL.BETRAG - 1
+              ]
+            ),
 
           status:
             row[
@@ -7943,6 +8473,8 @@ function errorPage(
 <html>
 
 <head>
+
+${dialogKit()}
 
 <meta name="viewport"
 content="width=device-width, initial-scale=1">
