@@ -47,19 +47,127 @@ const CONFIG = {
   WEBAPP_URL:
     "https://script.google.com/a/macros/neuenhof-koeln.de/s/AKfycbyrWdMOXVOFDA0Z9hA3OCq9gZZzbc1tW1jfQeKaEIp1GNwAc3vhsllXYuuELDy5dFAk/exec",
 
-  // TESTADRESSEN
-  // Später einfach hier ändern.
+  // ROLLEN
+  // Pro Rolle eine oder mehrere Adressen (z. B. Stellvertretung).
+  // Mails gehen an alle Adressen der Rolle.
+  // TESTADRESSEN – hier die echten Adressen eintragen.
 
-  KASSIERER_EMAIL:
-    "thobias.fritz@neuenhof-koeln.de",
-
-  VORSITZENDER_EMAIL:
-    "thobias.fritz@neuenhof-koeln.de",
-
-  ZWEITER_KASSIERER_EMAIL:
+  KASSIERER_EMAIL: [
     "thobias.fritz@neuenhof-koeln.de"
+  ],
+
+  VORSITZENDER_EMAIL: [
+    "thobias.fritz@neuenhof-koeln.de"
+  ],
+
+  ZWEITER_KASSIERER_EMAIL: [
+    "thobias.fritz@neuenhof-koeln.de"
+  ],
+
+  // Rollenprüfung nach angemeldetem Konto.
+  // false: alle Angemeldeten haben alle Rechte (Verhalten wie bisher).
+  // true:  Rechte nach den Adressen oben; alle anderen sehen nur
+  //        die Belegübersicht.
+  // Erst auf true setzen, wenn die echten Adressen eingetragen sind.
+  ROLLEN_PRUEFUNG_AKTIV: false
 
 };
+
+
+/************************************************************
+ * ROLLEN
+ ************************************************************/
+
+const ROLE_KASSIERER = "kassierer";
+const ROLE_VORSITZENDER = "vorsitzender";
+const ROLE_ZWEITER_KASSIERER = "zweiter_kassierer";
+
+const ALL_ROLES = [ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER];
+
+
+function emailList_(value) {
+
+  return (Array.isArray(value) ? value : String(value || "").split(","))
+    .map(function(email) { return String(email || "").trim().toLowerCase(); })
+    .filter(String);
+
+}
+
+
+let userRolesCache = null;
+
+// Rollen der angemeldeten Person
+function getUserRoles_() {
+
+  if (userRolesCache) {
+    return userRolesCache;
+  }
+
+  if (!CONFIG.ROLLEN_PRUEFUNG_AKTIV) {
+    userRolesCache = ALL_ROLES.slice();
+    return userRolesCache;
+  }
+
+  const email = getActiveUserEmail().toLowerCase();
+  const roles = [];
+
+  if (email) {
+    if (emailList_(CONFIG.KASSIERER_EMAIL).indexOf(email) >= 0) roles.push(ROLE_KASSIERER);
+    if (emailList_(CONFIG.VORSITZENDER_EMAIL).indexOf(email) >= 0) roles.push(ROLE_VORSITZENDER);
+    if (emailList_(CONFIG.ZWEITER_KASSIERER_EMAIL).indexOf(email) >= 0) roles.push(ROLE_ZWEITER_KASSIERER);
+  }
+
+  userRolesCache = roles;
+  return roles;
+
+}
+
+
+function hasRole_(role) {
+  return getUserRoles_().indexOf(role) >= 0;
+}
+
+
+function hasAnyRole_() {
+  return getUserRoles_().length > 0;
+}
+
+
+// Bricht eine Server-Aktion ab, wenn die Person keine der Rollen hat
+function requireRole_(allowed) {
+
+  const roles = getUserRoles_();
+
+  const ok = allowed.some(function(role) {
+    return roles.indexOf(role) >= 0;
+  });
+
+  if (!ok) {
+    throw new Error("Für diese Aktion fehlt die Berechtigung.");
+  }
+
+}
+
+
+// Ansicht der Belegprüfung: gewünschte Ansicht (Parameter "ansicht"),
+// sonst die "höchste" Rolle der Person.
+function detailView_(wanted) {
+
+  const roles = getUserRoles_();
+
+  if (wanted && roles.indexOf(wanted) >= 0) {
+    return wanted;
+  }
+
+  for (let i = 0; i < ALL_ROLES.length; i++) {
+    if (roles.indexOf(ALL_ROLES[i]) >= 0) {
+      return ALL_ROLES[i];
+    }
+  }
+
+  return "";
+
+}
 
 
 /************************************************************
@@ -118,12 +226,13 @@ const COL = {
   EINNAHME: 38,
   MTV_BUCHUNGSNUMMER: 39,
   UEBERWEISUNGSBETRAG: 40,
-  SAMMELUEBERWEISUNG: 41
+  SAMMELUEBERWEISUNG: 41,
+  NOTIZEN: 42
 
 };
 
 // Höchste vom Skript genutzte Spalte
-const COL_MAX = 41;
+const COL_MAX = 42;
 
 // Neue Spalten bekommen beim ersten Zugriff eine Überschrift.
 const COL_HEADERS = {
@@ -134,7 +243,8 @@ const COL_HEADERS = {
   38: "Einnahme",
   39: "MTV Buchungsnummer",
   40: "Überweisungsbetrag",
-  41: "Sammelüberweisung mit"
+  41: "Sammelüberweisung mit",
+  42: "Notizen"
 };
 
 const VORGANGSARTEN = [
@@ -186,51 +296,11 @@ const STATUS_UMBENENNUNG = {
 
 
 /************************************************************
- * DIAGNOSE
- ************************************************************/
-
-function diagnoseConnection(identifier) {
-  const wanted = String(identifier || "").trim();
-
-  if (!wanted) {
-    return {
-      ok: false,
-      message: "Kein Beleg-Schlüssel übergeben.",
-      identifier: ""
-    };
-  }
-
-  const row = findRowByIdentifier(wanted);
-
-  if (!row) {
-    return {
-      ok: false,
-      message: "Server erreichbar, aber Beleg nicht gefunden.",
-      identifier: wanted
-    };
-  }
-
-  const sheet = getSheet();
-  const actualBelegId = String(
-    sheet.getRange(row, COL.BELEG_ID).getValue() || ""
-  ).trim();
-
-  return {
-    ok: true,
-    message: "Verbindung zum Apps-Script-Server funktioniert.",
-    identifier: wanted,
-    row: row,
-    belegId: actualBelegId
-  };
-}
-
-
-/************************************************************
  * HILFSFUNKTIONEN
  ************************************************************/
 
 
-function getSheet() {
+function getSheet_() {
 
   const ss =
     SpreadsheetApp.getActiveSpreadsheet();
@@ -246,7 +316,7 @@ function getSheet() {
     );
   }
 
-  ensureColumns(sheet);
+  ensureColumns_(sheet);
 
   return sheet;
 }
@@ -256,7 +326,7 @@ function getSheet() {
 // und eine Überschrift haben (einmal pro Skriptausführung).
 let columnsChecked = false;
 
-function ensureColumns(sheet) {
+function ensureColumns_(sheet) {
 
   if (columnsChecked) {
     return;
@@ -284,7 +354,7 @@ function ensureColumns(sheet) {
     headerRange.setValues([headers]);
   }
 
-  migrateStatusNames(sheet);
+  migrateStatusNames_(sheet);
 
   columnsChecked = true;
 
@@ -293,7 +363,7 @@ function ensureColumns(sheet) {
 
 // Stellt frühere Status-Namen einmalig auf die neuen Namen um.
 // Ein Merker in den Skripteigenschaften verhindert Wiederholungen.
-function migrateStatusNames(sheet) {
+function migrateStatusNames_(sheet) {
 
   const props = PropertiesService.getScriptProperties();
   const key = "statusUmbenennung_v1";
@@ -334,7 +404,7 @@ function migrateStatusNames(sheet) {
 function getColumnHeader(col, fallback) {
 
   const value =
-    String(getSheet().getRange(1, col).getValue() || "").trim();
+    String(getSheet_().getRange(1, col).getValue() || "").trim();
 
   return value || fallback || "";
 
@@ -411,7 +481,7 @@ function isAmountLocked(values) {
  * Jahres abgeleitet, nicht aus der Zeilennummer.
  ************************************************************/
 
-function nextBelegId(sheet, year) {
+function nextBelegId_(sheet, year) {
 
   const lastRow =
     sheet.getLastRow();
@@ -449,15 +519,15 @@ function nextBelegId(sheet, year) {
 }
 
 
-function getOrCreateInternalId(rowNumber) {
-  const sheet = getSheet();
+function getOrCreateInternalId_(rowNumber) {
+  const sheet = getSheet_();
   let value = String(sheet.getRange(rowNumber, COL.INTERNE_ID).getValue() || "").trim();
   if (!value) { value = Utilities.getUuid(); sheet.getRange(rowNumber, COL.INTERNE_ID).setValue(value); }
   return value;
 }
 
-function ensureAllInternalIds() {
-  const sheet = getSheet();
+function ensureAllInternalIds_() {
+  const sheet = getSheet_();
   if (!sheet.getRange(1, COL.INTERNE_ID).getValue()) sheet.getRange(1, COL.INTERNE_ID).setValue("Interne Beleg-ID");
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
@@ -469,7 +539,7 @@ function ensureAllInternalIds() {
 }
 
 function findRowByInternalId(internalId) {
-  const sheet=getSheet(); const lastRow=sheet.getLastRow(); if(lastRow<2 || !internalId) return null;
+  const sheet=getSheet_(); const lastRow=sheet.getLastRow(); if(lastRow<2 || !internalId) return null;
   const ids=sheet.getRange(2,COL.INTERNE_ID,lastRow-1,1).getValues(); const wanted=String(internalId).trim();
   for(let i=0;i<ids.length;i++) if(String(ids[i][0]||"").trim()===wanted) return i+2;
   return null;
@@ -477,7 +547,7 @@ function findRowByInternalId(internalId) {
 
 function findRowByBelegId(belegId) {
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2 || !belegId) return null;
 
@@ -519,12 +589,12 @@ function findRowByIdentifier(identifier) {
 
 
 
-function getRowData(identifier, useInternalId) {
-  const sheet=getSheet();
+function getRowData_(identifier, useInternalId) {
+  const sheet=getSheet_();
   const rowNumber=useInternalId ? findRowByInternalId(identifier) : findRowByBelegId(identifier);
   if(!rowNumber) return null;
   const values=sheet.getRange(rowNumber,1,1,COL_MAX).getValues()[0];
-  getOrCreateInternalId(rowNumber);
+  getOrCreateInternalId_(rowNumber);
   values[COL.INTERNE_ID-1]=sheet.getRange(rowNumber,COL.INTERNE_ID).getValue();
   return {rowNumber:rowNumber,values:values};
 }
@@ -607,14 +677,14 @@ function jsonForHtml(value) {
 
 function makeWebUrl(belegId, extraParameters) {
   const row=findRowByIdentifier(belegId); let url=CONFIG.WEBAPP_URL;
-  if(row) url += "?key="+encodeURIComponent(getOrCreateInternalId(row));
+  if(row) url += "?key="+encodeURIComponent(getOrCreateInternalId_(row));
   else url += "?id="+encodeURIComponent(belegId);
   if(extraParameters) Object.keys(extraParameters).forEach(function(key){ url += "&"+encodeURIComponent(key)+"="+encodeURIComponent(extraParameters[key]); });
   return url;
 }
 
 
-function sendMail(
+function sendMail_(
   recipient,
   subject,
   body
@@ -622,7 +692,7 @@ function sendMail(
 
   MailApp.sendEmail({
 
-    to: recipient,
+    to: emailList_(recipient).join(","),
 
     subject: subject,
 
@@ -751,7 +821,7 @@ function onFormSubmit(e) {
   const amountNumber = amountOrNull(amount);
 
   if (amountNumber !== null) {
-    writeAmount(sheet, row, amountNumber);
+    writeAmount_(sheet, row, amountNumber);
     amount = amountNumber;
   }
 
@@ -809,7 +879,7 @@ function onFormSubmit(e) {
         : new Date().getFullYear();
 
     belegId =
-      nextBelegId(sheet, year);
+      nextBelegId_(sheet, year);
     sheet
       .getRange(row, COL.BELEG_ID)
       .setValue(belegId);
@@ -832,7 +902,7 @@ function onFormSubmit(e) {
 
 
   if (!sheet.getRange(1, COL.INTERNE_ID).getValue()) sheet.getRange(1, COL.INTERNE_ID).setValue("Interne Beleg-ID");
-  const internalId = getOrCreateInternalId(row);
+  const internalId = getOrCreateInternalId_(row);
 
 
   /******************************************************
@@ -932,7 +1002,7 @@ function onFormSubmit(e) {
    * KOPIE IN "BELEGEINGANG"
    ******************************************************/
 
-  syncBelegCopiesSafe(row);
+  syncBelegCopiesSafe_(row);
 
 
   /******************************************************
@@ -970,7 +1040,7 @@ function onFormSubmit(e) {
     "Bitte prüfe den Beleg:\n" +
     url;
 
-  sendMail(
+  sendMail_(
     CONFIG.KASSIERER_EMAIL,
     subject,
     body
@@ -1003,220 +1073,77 @@ function doGet(e) {
 function routeRequest(e) {
 
   const params =
-    e &&
-    e.parameter
+    e && e.parameter
       ? e.parameter
       : {};
 
-  const belegId=params.id || "";
-  const internalKey=params.key || "";
+  const belegId = params.id || "";
+  const internalKey = params.key || "";
+  const rolle = params.rolle || "";
 
-  const rolle =
-    params.rolle || "";
+  function page(html, title) {
+    return HtmlService
+      .createHtmlOutput(html)
+      .setTitle(title);
+  }
 
-  const uebersicht =
-    params.uebersicht || "";
+
+  // Belegübersicht: für alle Angemeldeten.
+  // Ohne Parameter öffnet sich ebenfalls die Belegübersicht.
+  if (params.uebersicht === "1" || (!belegId && !internalKey && params.neu !== "1")) {
+
+    if (rolle === ROLE_VORSITZENDER && hasRole_(ROLE_VORSITZENDER)) {
+      return page(createChairmanOverviewPage_(), "Genehmigungen – KGV Neuenhof");
+    }
+
+    if (rolle === ROLE_ZWEITER_KASSIERER && hasRole_(ROLE_ZWEITER_KASSIERER)) {
+      return page(createPaymentOverview_(), "Meine Überweisungen – KGV Neuenhof");
+    }
+
+    return page(createOverviewPage_(), "Belegübersicht – KGV Neuenhof");
+
+  }
+
+
+  // Alles Weitere nur für 1. Kassierer, 1. Vorsitzenden und 2. Kassierer
+  if (!hasAnyRole_()) {
+    return page(noAccessPage_(), "Kein Zugriff – KGV Neuenhof");
+  }
 
 
   if (params.neu === "1") {
-
-    return HtmlService
-      .createHtmlOutput(
-        createNewEntryPage()
-      )
-      .setTitle(
-        "Neuer Vorgang – KGV Neuenhof"
-      );
-
+    return page(createNewEntryPage_(), "Neuer Vorgang – KGV Neuenhof");
   }
 
 
-  if (
-    uebersicht === "1"
-  ) {
+  const identifier = belegId || internalKey;
+  const useInternalId = !!internalKey;
 
-    if (
-      rolle === "vorsitzender"
-    ) {
-
-      return HtmlService
-        .createHtmlOutput(
-          createChairmanOverviewPage()
-        )
-        .setTitle(
-          "Genehmigungen – KGV Neuenhof"
-        );
-
-    }
-
-    if (
-      rolle === "zweiter_kassierer"
-    ) {
-
-      return HtmlService
-        .createHtmlOutput(
-          createPaymentOverview()
-        )
-        .setTitle(
-          "Meine Überweisungen – KGV Neuenhof"
-        );
-
-    }
-
-    return HtmlService
-      .createHtmlOutput(
-        createOverviewPage()
-      )
-      .setTitle(
-        "Belegübersicht – KGV Neuenhof"
-      );
-
-  }
-
-
-  if (!belegId && !internalKey) {
-
-    return HtmlService
-      .createHtmlOutput(
-        createStartPage()
-      )
-      .setTitle(
-        "Belegprüfung KGV Neuenhof"
-      );
-
-  }
-
-
-  if (
-    rolle === "vorsitzender"
-  ) {
-
-    return HtmlService
-      .createHtmlOutput(
-        createChairmanPage(belegId || internalKey, !!internalKey)
-      )
-      .setTitle(
-        "Beleggenehmigung – KGV Neuenhof"
-      );
-
-  }
-
-
-  if (
-    rolle === "zweiter_kassierer"
-  ) {
-
-    return HtmlService
-      .createHtmlOutput(
-        createPaymentPage(belegId || internalKey, !!internalKey)
-      )
-      .setTitle(
-        "Überweisung – KGV Neuenhof"
-      );
-
-  }
-
-
-  return HtmlService
-    .createHtmlOutput(
-      createDetailPage(
-        belegId || internalKey,
-        !!internalKey
-      )
-    )
-    .setTitle(
-      "Belegprüfung KGV Neuenhof"
+  // Links aus den Mails führen zu den schlanken Seiten der Rollen
+  if (rolle === ROLE_VORSITZENDER && hasRole_(ROLE_VORSITZENDER)) {
+    return page(
+      createChairmanPage_(identifier, useInternalId),
+      "Beleggenehmigung – KGV Neuenhof"
     );
+  }
+
+  if (rolle === ROLE_ZWEITER_KASSIERER && hasRole_(ROLE_ZWEITER_KASSIERER)) {
+    return page(
+      createPaymentPage_(identifier, useInternalId),
+      "Überweisung – KGV Neuenhof"
+    );
+  }
+
+  // Belegprüfung mit den Buttons der jeweiligen Rolle
+  return page(
+    createDetailPage_(identifier, useInternalId, detailView_(params.ansicht)),
+    "Belegprüfung – KGV Neuenhof"
+  );
 
 }
 
 
-/************************************************************
- * STARTSEITE
- ************************************************************/
 
-
-function createStartPage() {
-
-  return `
-
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-${dialogKit()}
-
-<meta name="viewport"
-content="width=device-width, initial-scale=1">
-
-<style>
-
-body {
-  font-family: Arial, sans-serif;
-  background: #f5f7fa;
-  padding: 20px;
-}
-
-.container {
-  max-width: 700px;
-  margin: auto;
-  background: white;
-  padding: 30px;
-  border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(0,0,0,.12);
-}
-
-.button {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 14px;
-  margin-top: 15px;
-  border-radius: 8px;
-  border: none;
-  text-align: center;
-  text-decoration: none;
-  font-weight: bold;
-  font-size: 16px;
-  cursor: pointer;
-  background: #1769aa;
-  color: white;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>Belegprüfung KGV Neuenhof</h1>
-
-<p>
-Bitte öffne einen Beleg über den persönlichen Link
-aus der E-Mail.
-</p>
-
-<a
-  class="button"
-  href="${CONFIG.WEBAPP_URL}?uebersicht=1"
-  target="_blank"
->
-Belegübersicht öffnen
-</a>
-
-</div>
-
-</body>
-
-</html>
-
-`;
-
-}
 
 
 /************************************************************
@@ -1273,6 +1200,25 @@ function dialogKit() {
 
 .ui-dialog.ui-error h2 {
   color: #c5221f;
+}
+
+.page-logo {
+  height: 48px;
+  width: auto;
+  margin-right: 14px;
+  flex-shrink: 0;
+}
+
+.container > h1:first-of-type {
+  display: flex;
+  align-items: center;
+}
+
+@media (max-width: 700px) {
+  .page-logo {
+    height: 36px;
+    margin-right: 10px;
+  }
 }
 
 .ui-actions {
@@ -1417,6 +1363,26 @@ function uiAlert(message, title) {
 window.alert = function(message) {
   uiAlert(message);
 };
+
+
+// Vereinslogo vor die erste Überschrift jeder Seite setzen
+document.addEventListener("DOMContentLoaded", function() {
+
+  const heading = document.querySelector(".container > h1");
+
+  if (!heading || heading.querySelector(".page-logo")) {
+    return;
+  }
+
+  const logo = document.createElement("img");
+  logo.className = "page-logo";
+  logo.alt = "KGV Neuenhof";
+  logo.src = ${jsonForHtml(CONFIG.ICON_URL)};
+  logo.onerror = function() { logo.remove(); };
+
+  heading.insertBefore(logo, heading.firstChild);
+
+});
 
 </script>
 
@@ -1668,16 +1634,22 @@ textarea {
  ************************************************************/
 
 
-function createDetailPage(
-  belegId, useInternalId
+function createDetailPage_(
+  belegId, useInternalId, view
 ) {
 
+  // Welche Buttons diese Ansicht zeigt (siehe Rollen-Tabelle)
+  const isK = view === ROLE_KASSIERER;
+  const isV = view === ROLE_VORSITZENDER;
+  const isZ = view === ROLE_ZWEITER_KASSIERER;
+  const ro = isK ? "" : "disabled";
+
   const result =
-    getRowData(belegId, useInternalId);
+    getRowData_(belegId, useInternalId);
 
   if (!result) {
 
-    return errorPage(
+    return errorPage_(
       "Der Beleg " +
       htmlEscape(belegId) +
       " wurde nicht gefunden."
@@ -1820,7 +1792,7 @@ function createDetailPage(
 
 
   const payeeData =
-    getPaymentRecipients();
+    getPaymentRecipients_();
 
 
   return `
@@ -2647,7 +2619,7 @@ function deleteBelegConfirmed() {
           "</div>" +
           "<a class='button back-button' href='" +
           "${CONFIG.WEBAPP_URL}?uebersicht=1" +
-          "' target='_blank'>← Zur Belegübersicht</a>";
+          "' target='_top'>← Zur Belegübersicht</a>";
 
         window.scrollTo(0, 0);
 
@@ -2776,6 +2748,204 @@ function changeStatusManually() {
       .setStatusManuallyByRow(rowNumber, neu);
 
   });
+
+}
+
+
+function saveNotes() {
+
+  const button = document.getElementById("saveNotesButton");
+
+  button.disabled = true;
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      button.disabled = false;
+      showMessage(result);
+    })
+    .withFailureHandler(function(error) {
+      button.disabled = false;
+      alert("Fehler: " + error.message);
+    })
+    .saveNotesByRow(rowNumber, document.getElementById("notizen").value);
+
+}
+
+
+// ---------- 1. Vorsitzender: Entscheidung ----------
+
+function chairmanDecisionFromDetail(decision) {
+
+  const buttons = document.querySelectorAll(".chairman-button");
+
+  buttons.forEach(function(button) { button.disabled = true; });
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      buttons.forEach(function(button) { button.style.display = "none"; });
+      showMessage(result);
+    })
+    .withFailureHandler(function(error) {
+      buttons.forEach(function(button) { button.disabled = false; });
+      alert("Fehler: " + error.message);
+    })
+    .chairmanDecisionByRow(
+      rowNumber,
+      decision,
+      document.getElementById("chairmanComment").value
+    );
+
+}
+
+
+// ---------- 2. Kassierer: Überweisung angelegt ----------
+
+function transferDoneFromDetail() {
+
+  const button = document.getElementById("transferButton");
+
+  button.disabled = true;
+  button.innerText = "Wird gespeichert...";
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      button.innerText = "✓ Überweisung angelegt";
+      showMessage(result);
+    })
+    .withFailureHandler(function(error) {
+      button.disabled = false;
+      button.innerText = "💶 Überweisung angelegt";
+      alert("Fehler: " + error.message);
+    })
+    .transferDoneByRow(
+      rowNumber,
+      document.getElementById("transferComment").value
+    );
+
+}
+
+
+// ---------- Belegdateien entfernen / hinzufügen ----------
+
+function readUploadFile(file) {
+
+  return new Promise(function(resolve, reject) {
+
+    if (file.size > 10 * 1024 * 1024) {
+      reject(new Error("Die Datei " + file.name + " ist größer als 10 MB."));
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = function() {
+      resolve({
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        data: String(reader.result).split(",")[1]
+      });
+    };
+
+    reader.onerror = function() {
+      reject(new Error("Die Datei " + file.name + " konnte nicht gelesen werden."));
+    };
+
+    reader.readAsDataURL(file);
+
+  });
+
+}
+
+
+function applyBelegFilesResult(result) {
+
+  document.getElementById("belegFileList").innerHTML = result.listHtml;
+
+  const buttons = document.getElementById("belegButtons");
+  if (buttons) {
+    buttons.outerHTML = result.buttonsHtml;
+  }
+
+  const cell = document.getElementById("cell_dateiname");
+  if (cell) {
+    cell.innerText = result.dateinameText;
+  }
+
+  showMessage(result.message);
+
+}
+
+
+function removeBelegFile(button) {
+
+  const id = button.getAttribute("data-id");
+  const label = button.getAttribute("data-label");
+
+  uiConfirm({
+    title: "Datei entfernen?",
+    text:
+      "„" + label + "“ wird vom Beleg entfernt und nach " +
+      "Belegeingang/Gelöscht verschoben.",
+    okText: "Entfernen",
+    danger: true
+  }).then(function(answer) {
+
+    if (!answer) return;
+
+    button.disabled = true;
+
+    google.script.run
+      .withSuccessHandler(applyBelegFilesResult)
+      .withFailureHandler(function(error) {
+        button.disabled = false;
+        alert("Fehler: " + error.message);
+      })
+      .removeBelegFileByRow(rowNumber, id);
+
+  });
+
+}
+
+
+function addBelegFiles() {
+
+  const input = document.getElementById("addFiles");
+  const button = document.getElementById("addFilesButton");
+  const files = Array.prototype.slice.call(input.files || []);
+
+  if (!files.length) {
+    uiAlert("Bitte zuerst eine Datei auswählen.");
+    return;
+  }
+
+  button.disabled = true;
+  button.innerText = "Wird hochgeladen...";
+
+  function reset() {
+    button.disabled = false;
+    button.innerText = "+ Datei hinzufügen";
+  }
+
+  Promise.all(files.map(readUploadFile))
+    .then(function(data) {
+
+      google.script.run
+        .withSuccessHandler(function(result) {
+          reset();
+          input.value = "";
+          applyBelegFilesResult(result);
+        })
+        .withFailureHandler(function(error) {
+          reset();
+          alert("Fehler: " + error.message);
+        })
+        .addBelegFilesByRow(rowNumber, data);
+
+    })
+    .catch(function(error) {
+      reset();
+      alert("Fehler: " + error.message);
+    });
 
 }
 
@@ -2924,16 +3094,18 @@ ${vorgangRowsHtml(row)}
 
 <tr>
 <td class="label">Dateiname</td>
-<td id="cell_dateiname">${htmlEscape(dateiname)}</td>
+<td id="cell_dateiname">${belegFileNamesHtml(row)}</td>
 </tr>
 
 </table>
 
-${formDataEditorHtml(row)}
+${isK || isV ? formDataEditorHtml(row) : ""}
 
 
 
 ${belegButtonsHtml(row)}
+
+${isK ? belegFilesSectionHtml(row) : ""}
 
 
 <div class="section">
@@ -2957,7 +3129,7 @@ ${
 
 
 ${
-  originalbeleg !== "Ja"
+  originalbeleg !== "Ja" && isK
     ? `
 <button
   id="originalButton"
@@ -2993,6 +3165,7 @@ Zahlungsempfänger
   autocomplete="off"
   oninput="updatePayeeSuggestions()"
   placeholder="Name eingeben"
+  ${ro}
 />
 
 <div
@@ -3014,6 +3187,7 @@ IBAN
 <input
   id="iban"
   value="${htmlEscape(iban)}"
+  ${ro}
 />
 
 </div>
@@ -3028,6 +3202,7 @@ BIC
 <input
   id="bic"
   value="${htmlEscape(bic)}"
+  ${ro}
 />
 
 </div>
@@ -3042,6 +3217,7 @@ Zahlungsverwendungszweck
 <input
   id="zahlungszweck"
   value="${htmlEscape(zahlungszweck)}"
+  ${ro}
 />
 
 </div>
@@ -3055,6 +3231,7 @@ Information zur Überweisung
 
 <textarea
   id="info"
+  ${ro}
 >${htmlEscape(infoUeberweisung)}</textarea>
 
 </div>
@@ -3072,19 +3249,22 @@ Information zur Überweisung
   value="${htmlEscape(formatAmountDisplay(row[COL.UEBERWEISUNGSBETRAG - 1]))}"
   placeholder="leer = Belegbetrag (${htmlEscape(formatAmountDisplay(betrag))} €)"
   oninput="renderSepaQrCode()"
-  ${isAmountLocked(row) ? "disabled" : ""}
+  ${isAmountLocked(row) || !isK ? "disabled" : ""}
 >
 
 </div>
 
 
+${
+  isK
+    ? `
 <div class="form-row">
 
 <div class="form-label">
 Gemeinsam überweisen mit …
 </div>
 
-${sammelCandidatesHtml(result.rowNumber)}
+${sammelCandidatesHtml_(result.rowNumber)}
 
 <div class="small" style="margin-top:6px;color:#666">
 Die Summe wird automatisch als Überweisungsbetrag eingetragen
@@ -3093,6 +3273,9 @@ und lässt sich überschreiben. Gespeichert wird mit
 </div>
 
 </div>
+`
+    : ""
+}
 
 <div class="section">
 <div class="section-title">SEPA-QR-Code</div>
@@ -3102,6 +3285,9 @@ und lässt sich überschreiben. Gespeichert wird mit
 </div>
 
 
+${
+  isK
+    ? `
 <div class="checkbox-row">
 
 <label>
@@ -3158,6 +3344,9 @@ Originalbeleg ist vorhanden
 >
 → An 2. Kassierer zur Überweisung
 </button>
+`
+    : ""
+}
 
 </div>
 
@@ -3202,6 +3391,9 @@ ${
 }
 
 
+${
+  isK
+    ? `
 ${
   einnahme
     ? `
@@ -3260,6 +3452,11 @@ ${statusSelectHtml(row)}
 >
 🗑️ Beleg löschen
 </button>
+`
+    : ""
+}
+
+${isV && !einnahme ? chairmanDecisionBlockHtml(row) : ""}
 
 </div>
 
@@ -3269,6 +3466,8 @@ ${statusSelectHtml(row)}
 <div class="section-title">
 Überweisung / Nachbearbeitung
 </div>
+
+${isZ ? transferBlockHtml(row) : ""}
 
 
 <table>
@@ -3284,7 +3483,7 @@ ${htmlEscape(an2Kassierer)}
 
 <tr>
 <td class="label">
-Überweisung erfolgt am
+Überweisung angelegt am
 </td>
 <td>
 ${htmlEscape(ueberwiesenAm)}
@@ -3330,6 +3529,9 @@ ${htmlEscape(row[COL.MTV_BUCHUNGSNUMMER - 1])}
 </table>
 
 
+${
+  isK || isV
+    ? `
 <div class="form-row">
 
 <div class="form-label">
@@ -3343,8 +3545,14 @@ ${bezahltLabel}
 >
 
 </div>
+`
+    : ""
+}
 
 
+${
+  isK
+    ? `
 <div class="form-row">
 
 <div class="form-label">
@@ -3381,22 +3589,66 @@ MTV Buchungsnummer
 >
 💾 Datumsänderungen speichern
 </button>
+`
+    : ""
+}
 
 
+${
+  isK || isV
+    ? `
 <button
   class="button payment-button"
   onclick="markAsPaid()"
 >
 ${einnahme ? "✓ Zahlung eingegangen" : "✓ Als bezahlt markieren"}
 </button>
+`
+    : ""
+}
 
 
+${
+  isK
+    ? `
 <button
   class="button payment-button"
   onclick="markAsBooked()"
 >
 ✓ Als gebucht markieren
 </button>
+`
+    : ""
+}
+
+
+<div class="form-row" style="margin-top:25px">
+
+<div class="form-label">
+Notizen zum Beleg / Vorgang
+</div>
+
+<textarea
+  id="notizen"
+  ${ro}
+  placeholder="Interne Notizen, z. B. Rückfragen, Absprachen"
+>${htmlEscape(row[COL.NOTIZEN - 1])}</textarea>
+
+</div>
+
+${
+  isK
+    ? `
+<button
+  id="saveNotesButton"
+  class="button save-button"
+  onclick="saveNotes()"
+>
+💾 Notiz speichern
+</button>
+`
+    : ""
+}
 
 </div>
 
@@ -3404,7 +3656,7 @@ ${einnahme ? "✓ Zahlung eingegangen" : "✓ Als bezahlt markieren"}
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1"
-  target="_blank"
+  target="_top"
 >
 ← Zur Belegübersicht
 </a>
@@ -3417,6 +3669,297 @@ ${einnahme ? "✓ Zahlung eingegangen" : "✓ Als bezahlt markieren"}
 </html>
 
 `;
+
+}
+
+
+/************************************************************
+ * NOTIZEN (schreibt nur der 1. Kassierer)
+ ************************************************************/
+
+
+function saveNotesByRow(rowNumber, text) {
+
+  requireRole_([ROLE_KASSIERER]);
+
+  const sheet = getSheet_();
+  const n = Number(rowNumber);
+
+  getBelegIdFromRow(n);
+
+  sheet.getRange(n, COL.NOTIZEN).setValue(String(text || "").trim());
+  sheet.getRange(n, COL.LETZTE_BEARBEITUNG).setValue("Notiz bearbeitet");
+
+  return "Die Notiz wurde gespeichert.";
+
+}
+
+
+/************************************************************
+ * BELEGDATEIEN: ANZEIGE UND VERWALTUNG
+ *
+ * belegFileInfos_(values): Kopien in "Belegeingang" (mit Ordner),
+ * bei älteren Belegen ohne Kopie die Originaldateien.
+ ************************************************************/
+
+
+function belegFileInfos_(values) {
+
+  const copies = parseIdList(values[COL.BELEGKOPIE_ID - 1]);
+  const isCopy = copies.length > 0;
+  const ids = isCopy ? copies : extractDriveFileIds(values[COL.UPLOAD - 1]);
+  const names = String(values[COL.DATEINAME - 1] || "").split(", ");
+
+  return ids.map(function(id, index) {
+
+    let name = isCopy ? "" : (names[index] || "");
+    let folder = isCopy ? CONFIG.BELEG_ORDNER : "Original";
+
+    try {
+
+      const file = DriveApp.getFileById(id);
+      name = file.getName();
+
+      if (isCopy) {
+        const parents = file.getParents();
+        if (parents.hasNext()) {
+          const parent = parents.next().getName();
+          folder =
+            parent === CONFIG.BELEG_ORDNER
+              ? CONFIG.BELEG_ORDNER
+              : CONFIG.BELEG_ORDNER + "/" + parent;
+        }
+      }
+
+    } catch (error) {
+      name = name || "(Datei nicht gefunden)";
+    }
+
+    return {
+      id: id,
+      name: name,
+      folder: folder,
+      url: "https://drive.google.com/open?id=" + encodeURIComponent(id)
+    };
+
+  });
+
+}
+
+
+// Text für das Feld "Dateiname": eine Zeile pro Datei
+function belegFileNamesText(values) {
+
+  const files = belegFileInfos_(values);
+
+  if (!files.length) {
+    return String(values[COL.DATEINAME - 1] || "");
+  }
+
+  return files.map(function(file) {
+    return file.folder + ": " + file.name;
+  }).join("\n");
+
+}
+
+
+function belegFileNamesHtml(values) {
+  return htmlEscape(belegFileNamesText(values)).split("\n").join("<br>");
+}
+
+
+// Bereich "Belegdateien" für den 1. Kassierer
+function belegFilesSectionHtml(values) {
+
+  return `
+<div class="section">
+
+<div class="section-title">
+Belegdateien
+</div>
+
+<div id="belegFileList">${belegFileListHtml(belegFileInfos_(values))}</div>
+
+<div class="form-row" style="margin-top:15px">
+<div class="form-label">Datei hinzufügen</div>
+<input type="file" id="addFiles" multiple accept="application/pdf,image/*">
+<div class="small" style="margin-top:6px;color:#666">
+PDF oder Foto, max. 10 MB pro Datei.
+</div>
+</div>
+
+<button
+  id="addFilesButton"
+  class="button save-button"
+  onclick="addBelegFiles()"
+>
++ Datei hinzufügen
+</button>
+
+</div>
+`;
+
+}
+
+
+function belegFileListHtml(files) {
+
+  if (!files.length) {
+    return "<div class=\"small\" style=\"color:#666\">Keine Dateien vorhanden.</div>";
+  }
+
+  return files.map(function(file, index) {
+    return (
+      "<div style=\"display:flex;gap:8px;align-items:center;flex-wrap:wrap;" +
+      "padding:8px 0;border-bottom:1px solid #ddd\">" +
+      "<div style=\"flex:1;min-width:200px;word-break:break-word\">📄 " +
+      htmlEscape(file.folder + ": " + file.name) + "</div>" +
+      "<a class=\"open-button\" style=\"background:#1769aa;color:white;padding:6px 10px;" +
+      "border-radius:6px;text-decoration:none;font-weight:bold\" href=\"" +
+      htmlEscape(file.url) + "\" target=\"_blank\">Öffnen</a>" +
+      "<button style=\"background:#c5221f;color:white;border:none;padding:7px 10px;" +
+      "border-radius:6px;font-weight:bold;cursor:pointer\" " +
+      "data-id=\"" + htmlEscape(file.id) + "\" data-label=\"" + htmlEscape(file.name) + "\" " +
+      "onclick=\"removeBelegFile(this)\">Entfernen</button>" +
+      "</div>"
+    );
+  }).join("");
+
+}
+
+
+// Ergebnis für den Browser nach Entfernen/Hinzufügen
+function belegFilesResult_(rowNumber, message) {
+
+  const values = getSheet_().getRange(rowNumber, 1, 1, COL_MAX).getValues()[0];
+
+  return {
+    message: message,
+    listHtml: belegFileListHtml(belegFileInfos_(values)),
+    buttonsHtml: belegButtonsHtml(values),
+    dateinameText: belegFileNamesText(values)
+  };
+
+}
+
+
+function removeBelegFileByRow(rowNumber, fileId) {
+
+  requireRole_([ROLE_KASSIERER]);
+
+  const sheet = getSheet_();
+  const n = Number(rowNumber);
+
+  getBelegIdFromRow(n);
+
+  // Bei älteren Belegen zuerst die Kopien anlegen
+  syncBelegCopies_(n);
+
+  const values = sheet.getRange(n, 1, 1, COL_MAX).getValues()[0];
+  const copies = parseIdList(values[COL.BELEGKOPIE_ID - 1]);
+  const sources = extractDriveFileIds(values[COL.UPLOAD - 1]);
+  const names = String(values[COL.DATEINAME - 1] || "").split(", ").filter(String);
+
+  let index = copies.indexOf(fileId);
+
+  if (index < 0) {
+    index = sources.indexOf(fileId);
+  }
+
+  if (index < 0) {
+    throw new Error("Diese Datei gehört nicht zu diesem Beleg.");
+  }
+
+  // Nicht endgültig löschen, sondern nach "Belegeingang/Gelöscht"
+  const trash = getBelegFolder_(CONFIG.BELEG_ORDNER_GELOESCHT);
+
+  [copies[index], sources[index]].forEach(function(id) {
+    if (!id) return;
+    try {
+      DriveApp.getFileById(id).moveTo(trash);
+    } catch (error) {
+      Logger.log("Datei verschieben: " + error);
+    }
+  });
+
+  copies.splice(index, 1);
+  sources.splice(index, 1);
+
+  if (names.length > index) {
+    names.splice(index, 1);
+  }
+
+  sheet.getRange(n, COL.BELEGKOPIE_ID).setValue(copies.join(","));
+  sheet.getRange(n, COL.UPLOAD).setValue(
+    sources.map(function(id) { return "https://drive.google.com/open?id=" + id; }).join(", ")
+  );
+  sheet.getRange(n, COL.DATEINAME).setValue(names.join(", "));
+  sheet.getRange(n, COL.LETZTE_BEARBEITUNG).setValue("Belegdatei entfernt");
+
+  // Verbleibende Kopien neu nummerieren
+  syncBelegCopiesSafe_(n);
+
+  return belegFilesResult_(
+    n,
+    "Die Datei wurde entfernt und nach " + CONFIG.BELEG_ORDNER + "/" +
+    CONFIG.BELEG_ORDNER_GELOESCHT + " verschoben."
+  );
+
+}
+
+
+function addBelegFilesByRow(rowNumber, files) {
+
+  requireRole_([ROLE_KASSIERER]);
+
+  files = files || [];
+
+  if (!files.length) {
+    throw new Error("Bitte zuerst eine Datei auswählen.");
+  }
+
+  const sheet = getSheet_();
+  const n = Number(rowNumber);
+  const belegId = getBelegIdFromRow(n);
+  const values = sheet.getRange(n, 1, 1, COL_MAX).getValues()[0];
+  const sources = extractDriveFileIds(values[COL.UPLOAD - 1]);
+  const names = String(values[COL.DATEINAME - 1] || "").split(", ").filter(String);
+  const total = sources.length + files.length;
+  const uploadFolder = getBelegFolder_(CONFIG.BELEG_ORDNER_ORIGINALE);
+
+  files.forEach(function(data) {
+
+    const file = uploadFolder.createFile(
+      Utilities.newBlob(
+        Utilities.base64Decode(data.data),
+        data.mimeType,
+        data.name
+      )
+    );
+
+    const name = originalFileName(
+      belegId, values[COL.LIEFERANT - 1], sources.length, total, file.getName());
+
+    file.setName(name);
+    sources.push(file.getId());
+    names.push(name);
+
+  });
+
+  sheet.getRange(n, COL.UPLOAD).setValue(
+    sources.map(function(id) { return "https://drive.google.com/open?id=" + id; }).join(", ")
+  );
+  sheet.getRange(n, COL.DATEINAME).setValue(names.join(", "));
+  sheet.getRange(n, COL.LETZTE_BEARBEITUNG).setValue("Belegdatei hinzugefügt");
+
+  // Kopie im passenden Ordner anlegen und alle neu nummerieren
+  const hint = syncBelegCopiesSafe_(n);
+
+  return belegFilesResult_(
+    n,
+    (files.length === 1 ? "Die Datei wurde" : files.length + " Dateien wurden") +
+    " hinzugefügt." + hint
+  );
 
 }
 
@@ -3455,15 +3998,14 @@ function belegButtonsHtml(values) {
     links.push(upload);
   }
 
-  return links.map(function(link, index) {
+  return "<div id=\"belegButtons\">" + links.map(function(link, index) {
     return (
       "<a class=\"button document-button\" href=\"" + htmlEscape(link) +
       "\" target=\"_blank\">📄 Beleg öffnen" +
       (links.length > 1 ? " (" + (index + 1) + ")" : "") +
       "</a>"
     );
-  }).join("");
-
+  }).join("") + "</div>";
 }
 
 
@@ -3525,9 +4067,9 @@ function payeeKey(values) {
 }
 
 
-function getSammelCandidates(rowNumber) {
+function getSammelCandidates_(rowNumber) {
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
   const lastRow = sheet.getLastRow();
 
   if (lastRow < 2) {
@@ -3588,9 +4130,9 @@ function getSammelCandidates(rowNumber) {
 }
 
 
-function sammelCandidatesHtml(rowNumber) {
+function sammelCandidatesHtml_(rowNumber) {
 
-  const list = getSammelCandidates(rowNumber);
+  const list = getSammelCandidates_(rowNumber);
 
   if (!list.length) {
     return "<div class=\"small\" style=\"color:#666\">Keine weiteren offenen Belege vorhanden.</div>";
@@ -3635,9 +4177,9 @@ function removeSammelLine(text) {
 
 
 // Wird aus savePaymentData aufgerufen. Liefert einen Zusatztext.
-function updateSammelueberweisung(row, belegId, data) {
+function updateSammelueberweisung_(row, belegId, data) {
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
   const values = sheet.getRange(row, 1, 1, COL_MAX).getValues()[0];
   let hint = "";
 
@@ -3805,7 +4347,9 @@ function statusSelectHtml(values) {
 
 function setStatusManuallyByRow(rowNumber, newStatus) {
 
-  const sheet = getSheet();
+  requireRole_([ROLE_KASSIERER]);
+
+  const sheet = getSheet_();
   const n = Number(rowNumber);
 
   getBelegIdFromRow(n);
@@ -3834,11 +4378,70 @@ function setStatusManuallyByRow(rowNumber, newStatus) {
 
 
 /************************************************************
+ * BLÖCKE FÜR VORSITZENDEN / 2. KASSIERER AUF DER BELEGPRÜFUNG
+ ************************************************************/
+
+
+function chairmanDecisionBlockHtml(values) {
+
+  if (String(values[COL.GENEHMIGUNG_VORSITZENDER - 1] || "").trim()) {
+    return "";
+  }
+
+  return `
+<div class="form-row" style="margin-top:15px">
+<div class="form-label">Kommentar des 1. Vorsitzenden</div>
+<textarea id="chairmanComment" placeholder="Optionaler Kommentar"></textarea>
+</div>
+
+<button
+  class="button approve-button chairman-button"
+  onclick="chairmanDecisionFromDetail('Genehmigt')"
+>
+✅ Beleg genehmigen
+</button>
+
+<button
+  class="button reject-button chairman-button"
+  onclick="chairmanDecisionFromDetail('Abgelehnt')"
+>
+❌ Beleg ablehnen
+</button>
+`;
+
+}
+
+
+function transferBlockHtml(values) {
+
+  if (String(values[COL.STATUS - 1] || "").trim() !== STATUS_UEBERWEISUNG_WIRD_ANGELEGT) {
+    return "";
+  }
+
+  return `
+<div class="form-row">
+<div class="form-label">Kommentar des 2. Kassierers</div>
+<textarea id="transferComment" placeholder="Optionaler Kommentar"></textarea>
+</div>
+
+<button
+  id="transferButton"
+  class="button payment-button"
+  onclick="transferDoneFromDetail()"
+>
+💶 Überweisung angelegt
+</button>
+`;
+
+}
+
+
+/************************************************************
  * TABELLENZEILEN VORGANGSART / ZUSATZANGABEN
  ************************************************************/
 
 
-function vorgangRowsHtml(values) {
+function vorgangRowsHtml(values, withNotes) {
 
   const zusatz =
     String(values[COL.ZUSATZANGABEN - 1] || "").trim();
@@ -3851,6 +4454,11 @@ function vorgangRowsHtml(values) {
     (String(values[COL.SAMMELUEBERWEISUNG - 1] || "").trim()
       ? "<tr><td class=\"label\">Sammelüberweisung mit</td><td>" +
         htmlEscape(values[COL.SAMMELUEBERWEISUNG - 1]) +
+        "</td></tr>"
+      : "") +
+    (withNotes && String(values[COL.NOTIZEN - 1] || "").trim()
+      ? "<tr><td class=\"label\">Notizen</td><td>" +
+        htmlEscape(values[COL.NOTIZEN - 1]).split("\n").join("<br>") +
         "</td></tr>"
       : "") +
     (zusatz
@@ -3907,7 +4515,9 @@ function htmlDateValue(
  ************************************************************/
 
 function getBelegIdFromRow(rowNumber) {
-  const sheet = getSheet();
+
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER]);
+  const sheet = getSheet_();
   const n = Number(rowNumber);
 
   if (!Number.isInteger(n) || n < 2 || n > sheet.getLastRow()) {
@@ -3926,14 +4536,20 @@ function getBelegIdFromRow(rowNumber) {
 }
 
 function originalbelegVorhandenByRow(rowNumber) {
+
+  requireRole_([ROLE_KASSIERER]);
   return originalbelegVorhanden(getBelegIdFromRow(rowNumber));
 }
 
 function savePaymentDataByRow(rowNumber, data) {
+
+  requireRole_([ROLE_KASSIERER]);
   return savePaymentData(getBelegIdFromRow(rowNumber), data || {});
 }
 
 function sendToSecondCashierByRow(rowNumber, data) {
+
+  requireRole_([ROLE_KASSIERER]);
   const belegId = getBelegIdFromRow(rowNumber);
 
   // Die im Formular eingetragenen Zahlungsdaten zuerst speichern.
@@ -3944,7 +4560,7 @@ function sendToSecondCashierByRow(rowNumber, data) {
 
     // Häkchen "Originalbeleg ist vorhanden" ebenfalls übernehmen.
     if (data.originalConfirmed) {
-      const sheet = getSheet();
+      const sheet = getSheet_();
       const n = Number(rowNumber);
       if (sheet.getRange(n, COL.ORIGINALBELEG).getValue() !== "Ja") {
         originalbelegVorhanden(belegId);
@@ -3956,10 +4572,14 @@ function sendToSecondCashierByRow(rowNumber, data) {
 }
 
 function entscheidungTreffenByRow(rowNumber, action) {
+
+  requireRole_([ROLE_KASSIERER]);
   return entscheidungTreffen(getBelegIdFromRow(rowNumber), String(action || ""));
 }
 
 function chairmanDecisionByRow(rowNumber, decision, comment) {
+
+  requireRole_([ROLE_VORSITZENDER]);
   return chairmanDecision(
     getBelegIdFromRow(rowNumber),
     decision,
@@ -3971,7 +4591,9 @@ function chairmanDecisionByRow(rowNumber, decision, comment) {
 // oder in einer Sitzung). Keine Mail an den Vorsitzenden.
 function chairmanApprovedManuallyByRow(rowNumber) {
 
-  const sheet = getSheet();
+  requireRole_([ROLE_KASSIERER]);
+
+  const sheet = getSheet_();
   const n = Number(rowNumber);
 
   getBelegIdFromRow(n);
@@ -3987,6 +4609,8 @@ function chairmanApprovedManuallyByRow(rowNumber) {
 }
 
 function transferDoneByRow(rowNumber, comment) {
+
+  requireRole_([ROLE_ZWEITER_KASSIERER]);
   return transferDone(
     getBelegIdFromRow(rowNumber),
     comment || ""
@@ -3994,6 +4618,8 @@ function transferDoneByRow(rowNumber, comment) {
 }
 
 function markAsPaidByRow(rowNumber, dateString) {
+
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER]);
   return markAsPaid(
     getBelegIdFromRow(rowNumber),
     String(dateString || "")
@@ -4001,6 +4627,8 @@ function markAsPaidByRow(rowNumber, dateString) {
 }
 
 function markAsBookedByRow(rowNumber, dateString, mtvNummer) {
+
+  requireRole_([ROLE_KASSIERER]);
   return markAsBooked(
     getBelegIdFromRow(rowNumber),
     String(dateString || ""),
@@ -4009,6 +4637,8 @@ function markAsBookedByRow(rowNumber, dateString, mtvNummer) {
 }
 
 function setAccountingDatesByRow(rowNumber, data) {
+
+  requireRole_([ROLE_KASSIERER]);
   const payload = data || {};
   return setAccountingDates(
     getBelegIdFromRow(rowNumber),
@@ -4019,50 +4649,21 @@ function setAccountingDatesByRow(rowNumber, data) {
 }
 
 function deleteBelegByRow(rowNumber) {
+
+  requireRole_([ROLE_KASSIERER]);
   return deleteBeleg(getBelegIdFromRow(rowNumber));
 }
 
-function performButtonAction(rowNumber, action, payload) {
-  const sheet = getSheet();
-  const n = Number(rowNumber);
-  if (!Number.isInteger(n) || n < 2 || n > sheet.getLastRow()) {
-    throw new Error("Ungültige Belegzeile: " + rowNumber);
-  }
-
-  const actualBelegId = String(sheet.getRange(n, COL.BELEG_ID).getValue() || "").trim();
-  if (!actualBelegId) throw new Error("In dieser Zeile ist keine Beleg-ID vorhanden.");
-
-  switch (String(action || "")) {
-    case "savePaymentData":
-      return savePaymentData(actualBelegId, payload || {});
-    case "sendToSecondCashier":
-      return sendToSecondCashier(actualBelegId);
-    case "entscheidungTreffen":
-      return entscheidungTreffen(actualBelegId, String(payload || ""));
-    case "chairmanDecision":
-      return chairmanDecision(actualBelegId, payload && payload.decision, payload && payload.comment);
-    case "transferDone":
-      return transferDone(actualBelegId, String(payload || ""));
-    case "markAsPaid":
-      return markAsPaid(actualBelegId, String(payload || ""));
-    case "markAsBooked":
-      return markAsBooked(actualBelegId, String(payload || ""), "");
-    case "setAccountingDates":
-      return setAccountingDates(actualBelegId, payload && payload.bezahlt, payload && payload.gebucht, payload && payload.mtv);
-    case "deleteBeleg":
-      return deleteBeleg(actualBelegId);
-    default:
-      throw new Error("Unbekannte Aktion: " + action);
-  }
-}
 
 
 function originalbelegVorhanden(
   belegId
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -4110,8 +4711,10 @@ function entscheidungTreffen(
   entscheidung
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -4167,7 +4770,7 @@ function entscheidungTreffen(
       );
 
 
-    sendChairmanApprovalMail(
+    sendChairmanApprovalMail_(
       belegId
     );
 
@@ -4258,8 +4861,10 @@ function savePaymentData(
   data
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -4369,7 +4974,7 @@ function savePaymentData(
     recipient
   ) {
 
-    savePayeeToMasterData(
+    savePayeeToMasterData_(
       recipient,
       iban,
       bic
@@ -4379,7 +4984,7 @@ function savePaymentData(
 
 
   const sammelHint =
-    updateSammelueberweisung(row, belegId, data);
+    updateSammelueberweisung_(row, belegId, data);
 
 
   return (
@@ -4395,7 +5000,7 @@ function savePaymentData(
  ************************************************************/
 
 
-function getPaymentRecipients() {
+function getPaymentRecipients_() {
 
   const ss =
     SpreadsheetApp
@@ -4498,7 +5103,7 @@ function getPaymentRecipients() {
  ************************************************************/
 
 
-function savePayeeToMasterData(
+function savePayeeToMasterData_(
   name,
   iban,
   bic
@@ -4611,8 +5216,10 @@ function sendToSecondCashier(
   belegId
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -4774,7 +5381,7 @@ function sendToSecondCashier(
     url;
 
 
-  sendMail(
+  sendMail_(
     CONFIG.ZWEITER_KASSIERER_EMAIL,
     subject,
     body
@@ -4794,12 +5401,12 @@ function sendToSecondCashier(
  ************************************************************/
 
 
-function sendChairmanApprovalMail(
+function sendChairmanApprovalMail_(
   belegId
 ) {
 
   const result =
-    getRowData(
+    getRowData_(
       belegId
     );
 
@@ -4868,7 +5475,7 @@ function sendChairmanApprovalMail(
     url;
 
 
-  sendMail(
+  sendMail_(
     CONFIG.VORSITZENDER_EMAIL,
     subject,
     body
@@ -4882,16 +5489,16 @@ function sendChairmanApprovalMail(
  ************************************************************/
 
 
-function createChairmanPage(
+function createChairmanPage_(
   belegId, useInternalId
 ) {
 
   const result =
-    getRowData(belegId, useInternalId);
+    getRowData_(belegId, useInternalId);
 
   if (!result) {
 
-    return errorPage(
+    return errorPage_(
       "Der Beleg wurde nicht gefunden."
     );
 
@@ -5138,7 +5745,7 @@ ${htmlEscape(status)}
 
 <table style="margin-top:20px">
 
-${vorgangRowsHtml(row)}
+${vorgangRowsHtml(row, true)}
 
 <tr>
 <td class="label">Einreicher</td>
@@ -5182,7 +5789,7 @@ ${vorgangRowsHtml(row)}
 
 <tr>
 <td class="label">Dateiname</td>
-<td id="cell_dateiname">${htmlEscape(filename)}</td>
+<td id="cell_dateiname">${belegFileNamesHtml(row)}</td>
 </tr>
 
 </table>
@@ -5293,9 +5900,17 @@ Zahlung
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1&rolle=vorsitzender"
-  target="_blank"
+  target="_top"
 >
 ← Meine Genehmigungen
+</a>
+
+<a
+  class="button back-button"
+  href="${CONFIG.WEBAPP_URL}?uebersicht=1"
+  target="_top"
+>
+← Zur Belegübersicht
 </a>
 
 
@@ -5321,8 +5936,10 @@ function chairmanDecision(
   comment
 ) {
 
+  requireRole_([ROLE_VORSITZENDER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -5432,7 +6049,7 @@ function chairmanDecision(
     url;
 
 
-  sendMail(
+  sendMail_(
     CONFIG.KASSIERER_EMAIL,
     "Entscheidung zum Beleg – " +
       belegId,
@@ -5454,16 +6071,16 @@ function chairmanDecision(
  ************************************************************/
 
 
-function createPaymentPage(
+function createPaymentPage_(
   belegId, useInternalId
 ) {
 
   const result =
-    getRowData(belegId, useInternalId);
+    getRowData_(belegId, useInternalId);
 
   if (!result) {
 
-    return errorPage(
+    return errorPage_(
       "Der Beleg wurde nicht gefunden."
     );
 
@@ -5659,7 +6276,7 @@ function transferDone() {
           result;
 
         button.innerText =
-          "✓ Überweisung erfolgt";
+          "✓ Überweisung angelegt";
 
       }
     )
@@ -5671,7 +6288,7 @@ function transferDone() {
           false;
 
         button.innerText =
-          "💶 Überweisung erfolgt";
+          "💶 Überweisung angelegt";
 
         alert(
           "Fehler: " +
@@ -5715,7 +6332,7 @@ ${htmlEscape(status)}
 
 <table style="margin-top:20px">
 
-${vorgangRowsHtml(row)}
+${vorgangRowsHtml(row, true)}
 
 <tr>
 <td class="label">Einreicher</td>
@@ -5870,18 +6487,14 @@ ${
   class="button payment-button"
   onclick="transferDone()"
 >
-💶 Überweisung erfolgt
+💶 Überweisung angelegt
 </button>
 `
     : `
 <div class="message">
 
-Überweisung bereits verarbeitet.
-
-<br>
-
-Überweisung angelegt am:
-${htmlEscape(ueberwiesenAm)}
+Überweisung bereits angelegt am
+${htmlEscape(ueberwiesenAm || "–")}.
 
 </div>
 `
@@ -5891,9 +6504,17 @@ ${htmlEscape(ueberwiesenAm)}
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1&rolle=zweiter_kassierer"
-  target="_blank"
+  target="_top"
 >
 ← Meine Überweisungen
+</a>
+
+<a
+  class="button back-button"
+  href="${CONFIG.WEBAPP_URL}?uebersicht=1"
+  target="_top"
+>
+← Zur Belegübersicht
 </a>
 
 </div>
@@ -5961,8 +6582,10 @@ function transferDone(
   comment
 ) {
 
+  requireRole_([ROLE_ZWEITER_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -6041,17 +6664,17 @@ function transferDone(
     url;
 
 
-  sendMail(
+  sendMail_(
     CONFIG.KASSIERER_EMAIL,
-    "Überweisung erfolgt – " +
+    "Überweisung angelegt – " +
       belegId,
     body
   );
 
 
-  sendMail(
+  sendMail_(
     CONFIG.VORSITZENDER_EMAIL,
-    "Überweisung erfolgt – " +
+    "Überweisung angelegt – " +
       belegId,
     body
   );
@@ -6076,8 +6699,10 @@ function markAsPaid(
   dateString
 ) {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -6144,7 +6769,7 @@ function markAsPaid(
       Session.getScriptTimeZone(),
       "dd.MM.yyyy"
     ) +
-    syncBelegCopiesSafe(row)
+    syncBelegCopiesSafe_(row)
   );
 
 }
@@ -6161,8 +6786,10 @@ function markAsBooked(
   mtvNummer
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -6234,7 +6861,7 @@ function markAsBooked(
       Session.getScriptTimeZone(),
       "dd.MM.yyyy"
     ) +
-    syncBelegCopiesSafe(row)
+    syncBelegCopiesSafe_(row)
   );
 
 }
@@ -6252,8 +6879,10 @@ function setAccountingDates(
   mtvNummer
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -6344,7 +6973,7 @@ function setAccountingDates(
 
   return (
     "Die Datumsangaben wurden gespeichert." +
-    syncBelegCopiesSafe(row)
+    syncBelegCopiesSafe_(row)
   );
 
 }
@@ -6436,7 +7065,7 @@ function parseDateInput(
  ************************************************************/
 
 
-function getOrCreateFolder(parent, name) {
+function getOrCreateFolder_(parent, name) {
 
   const folders =
     parent.getFoldersByName(name);
@@ -6448,7 +7077,7 @@ function getOrCreateFolder(parent, name) {
 }
 
 
-function getBelegFolder(subfolderName) {
+function getBelegFolder_(subfolderName) {
 
   const spreadsheetFile =
     DriveApp.getFileById(
@@ -6464,10 +7093,10 @@ function getBelegFolder(subfolderName) {
       : DriveApp.getRootFolder();
 
   const eingang =
-    getOrCreateFolder(base, CONFIG.BELEG_ORDNER);
+    getOrCreateFolder_(base, CONFIG.BELEG_ORDNER);
 
   return subfolderName
-    ? getOrCreateFolder(eingang, subfolderName)
+    ? getOrCreateFolder_(eingang, subfolderName)
     : eingang;
 
 }
@@ -6542,9 +7171,9 @@ function buildBelegCopyBaseName(values) {
 }
 
 
-function syncBelegCopies(rowNumber, deleted) {
+function syncBelegCopies_(rowNumber, deleted) {
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
 
   const values =
     sheet
@@ -6566,54 +7195,44 @@ function syncBelegCopies(rowNumber, deleted) {
   let target;
 
   if (deleted) {
-    target = getBelegFolder(CONFIG.BELEG_ORDNER_GELOESCHT);
+    target = getBelegFolder_(CONFIG.BELEG_ORDNER_GELOESCHT);
     folderLabel += "/" + CONFIG.BELEG_ORDNER_GELOESCHT;
   } else if (values[COL.GEBUCHT_AM - 1]) {
-    target = getBelegFolder(CONFIG.BELEG_ORDNER_GEBUCHT);
+    target = getBelegFolder_(CONFIG.BELEG_ORDNER_GEBUCHT);
     folderLabel += "/" + CONFIG.BELEG_ORDNER_GEBUCHT;
   } else if (values[COL.BEZAHLT_AM - 1]) {
-    target = getBelegFolder(CONFIG.BELEG_ORDNER_BEZAHLT);
+    target = getBelegFolder_(CONFIG.BELEG_ORDNER_BEZAHLT);
     folderLabel += "/" + CONFIG.BELEG_ORDNER_BEZAHLT;
   } else {
-    target = getBelegFolder("");
+    target = getBelegFolder_("");
   }
 
 
-  // Noch keine Kopie vorhanden (neuer Beleg oder Beleg von vor
-  // Einführung dieser Funktion): jetzt aus dem Upload anlegen.
-  if (!copyIds.length) {
+  // Fehlende Kopien anlegen: neuer Beleg, Beleg von vor Einführung
+  // dieser Funktion oder nachträglich hinzugefügte Datei.
+  // Kopie i gehört immer zur Upload-Datei i.
+  const sourceIds =
+    extractDriveFileIds(values[COL.UPLOAD - 1]);
 
-    const sourceIds =
-      extractDriveFileIds(values[COL.UPLOAD - 1]);
+  if (copyIds.length < sourceIds.length) {
 
-    if (!sourceIds.length) {
-      return "";
+    for (let i = copyIds.length; i < sourceIds.length; i++) {
+      const source = DriveApp.getFileById(sourceIds[i]);
+      copyIds.push(source.makeCopy(source.getName(), target).getId());
     }
-
-    copyIds =
-      sourceIds.map(function(sourceId, index) {
-
-        const source = DriveApp.getFileById(sourceId);
-
-        const name =
-          baseName +
-          (sourceIds.length > 1 ? "_" + (index + 1) : "") +
-          getFileExtension(source.getName());
-
-        return source.makeCopy(name, target).getId();
-
-      });
 
     sheet
       .getRange(rowNumber, COL.BELEGKOPIE_ID)
       .setValue(copyIds.join(","));
 
-    return folderLabel;
+  }
 
+  if (!copyIds.length) {
+    return "";
   }
 
 
-  // Vorhandene Kopien umbenennen und verschieben
+  // Alle Kopien einheitlich benennen und in den Zielordner verschieben
   copyIds.forEach(function(copyId, index) {
 
     const file = DriveApp.getFileById(copyId);
@@ -6636,11 +7255,11 @@ function syncBelegCopies(rowNumber, deleted) {
 // Ein Fehler bei der Ablage darf die eigentliche Aktion
 // (Formulareingang, bezahlt, gebucht) nicht abbrechen.
 // Rückgabe: Zusatztext für die Erfolgsmeldung.
-function syncBelegCopiesSafe(rowNumber, deleted) {
+function syncBelegCopiesSafe_(rowNumber, deleted) {
 
   try {
 
-    const folder = syncBelegCopies(rowNumber, deleted);
+    const folder = syncBelegCopies_(rowNumber, deleted);
 
     return folder
       ? " Belegkopie liegt in " + folder + "."
@@ -6670,8 +7289,10 @@ function deleteBeleg(
   belegId
 ) {
 
+  requireRole_([ROLE_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const row =
     findRowByIdentifier(
@@ -6688,7 +7309,7 @@ function deleteBeleg(
   // Belegkopie vor dem Löschen der Zeile nach "Gelöscht" verschieben,
   // danach sind die Drive-IDs nicht mehr in der Tabelle.
   const ablage =
-    syncBelegCopiesSafe(row, true);
+    syncBelegCopiesSafe_(row, true);
 
 
   sheet.deleteRow(
@@ -6715,8 +7336,10 @@ function getPayeeSuggestions(
   searchText
 ) {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER]);
+
   const all =
-    getPaymentRecipients();
+    getPaymentRecipients_();
 
   const query =
     String(
@@ -6823,7 +7446,7 @@ const AMOUNT_NUMBER_FORMAT = '#,##0.00 "€"';
 
 // Betrag in die Tabelle schreiben: als Zahl mit Euro-Format,
 // sonst unverändert.
-function writeAmount(sheet, row, value) {
+function writeAmount_(sheet, row, value) {
 
   const range = sheet.getRange(row, COL.BETRAG);
 
@@ -7007,9 +7630,11 @@ function saveFormData() {
 
 function saveFormDataByRow(rowNumber, data) {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER]);
+
   data = data || {};
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
   const n = Number(rowNumber);
   const belegId = getBelegIdFromRow(n);
   const values = sheet.getRange(n, 1, 1, COL_MAX).getValues()[0];
@@ -7043,7 +7668,7 @@ function saveFormDataByRow(rowNumber, data) {
 
     if (field.id === "betrag") {
       if (amountChanged) {
-        writeAmount(sheet, n, newAmount);
+        writeAmount_(sheet, n, newAmount);
       }
       return;
     }
@@ -7092,7 +7717,7 @@ function saveFormDataByRow(rowNumber, data) {
     }
 
     // Belegkopie trägt den Lieferanten im Namen
-    hint += syncBelegCopiesSafe(n);
+    hint += syncBelegCopiesSafe_(n);
 
   }
 
@@ -7109,7 +7734,7 @@ function saveFormDataByRow(rowNumber, data) {
       lieferant: newSupplier,
       betrag: formatAmountDisplay(amount),
       auszahlungAn: text(data.auszahlungAn),
-      dateiname: dateiname
+      dateiname: belegFileNamesText(sheet.getRange(n, 1, 1, COL_MAX).getValues()[0])
     }
   };
 
@@ -7140,7 +7765,7 @@ function getActiveUserEmail() {
 }
 
 
-function createNewEntryPage() {
+function createNewEntryPage_() {
 
   const options =
     VORGANGSARTEN.map(function(art) {
@@ -7593,7 +8218,7 @@ PDF oder Foto, max. 10 MB pro Datei. Mehrere Dateien möglich.
   id="openLink"
   class="button document-button"
   href="#"
-  target="_blank"
+  target="_top"
 >
 📄 Vorgang öffnen
 </a>
@@ -7611,7 +8236,7 @@ PDF oder Foto, max. 10 MB pro Datei. Mehrere Dateien möglich.
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1"
-  target="_blank"
+  target="_top"
 >
 ← Zur Belegübersicht
 </a>
@@ -7656,9 +8281,11 @@ function originalFileName(belegId, supplier, index, count, currentName) {
 
 function createManualEntry(data) {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER]);
+
   data = data || {};
 
-  const sheet = getSheet();
+  const sheet = getSheet_();
 
   const art =
     VORGANGSARTEN.indexOf(data.vorgangsart) >= 0
@@ -7697,7 +8324,7 @@ function createManualEntry(data) {
   const files = data.files || [];
 
   const uploadFolder =
-    files.length ? getBelegFolder(CONFIG.BELEG_ORDNER_ORIGINALE) : null;
+    files.length ? getBelegFolder_(CONFIG.BELEG_ORDNER_ORIGINALE) : null;
 
   const uploadedFiles =
     files.map(function(file) {
@@ -7719,7 +8346,7 @@ function createManualEntry(data) {
 
   try {
 
-    belegId = nextBelegId(sheet, now.getFullYear());
+    belegId = nextBelegId_(sheet, now.getFullYear());
 
     const values = new Array(COL_MAX).fill("");
 
@@ -7769,7 +8396,7 @@ function createManualEntry(data) {
       .getRange(row, 1, 1, COL_MAX)
       .setValues([values]);
 
-    writeAmount(sheet, row, betrag);
+    writeAmount_(sheet, row, betrag);
 
   } finally {
 
@@ -7779,7 +8406,7 @@ function createManualEntry(data) {
 
 
   if (!einnahme && data.masterUpdate && text(data.auszahlungAn)) {
-    savePayeeToMasterData(
+    savePayeeToMasterData_(
       text(data.auszahlungAn),
       text(data.iban),
       text(data.bic)
@@ -7793,7 +8420,7 @@ function createManualEntry(data) {
     message:
       "Vorgang " + belegId + " (" + art + (einnahme ? ", Einnahme" : "") +
       ") wurde angelegt." +
-      syncBelegCopiesSafe(row)
+      syncBelegCopiesSafe_(row)
   };
 
 }
@@ -7804,7 +8431,7 @@ function createManualEntry(data) {
  ************************************************************/
 
 
-function createOverviewPage() {
+function createOverviewPage_() {
 
   return `
 
@@ -7950,6 +8577,9 @@ select {
 let rows = [];
 let currentSort = "date";
 let currentDirection = "desc";
+
+// Nur Kassierer, Vorsitzender und 2. Kassierer dürfen Belege öffnen
+const CAN_OPEN = ${jsonForHtml(hasAnyRole_())};
 
 
 function loadOverview() {
@@ -8173,19 +8803,25 @@ function renderTable() {
         escapeHtml(item.status) +
         "</td>" +
 
-        "<td class='action'>" +
-        "<a class='open-button' href='" + url + "' target='_blank'>" +
-        "📄 Öffnen" +
-        "</a>" +
-        "</td>";
+        (CAN_OPEN
+          ? "<td class='action'>" +
+            "<a class='open-button' href='" + url + "' target='_top'>" +
+            "📄 Öffnen" +
+            "</a>" +
+            "</td>"
+          : "");
 
 
       // Ganze Zeile anklickbar
-      tr.onclick = function(event) {
-        if (!event.target.closest("a")) {
-          window.open(url, "_blank");
-        }
-      };
+      if (CAN_OPEN) {
+        tr.onclick = function(event) {
+          if (!event.target.closest("a")) {
+            window.open(url, "_top");
+          }
+        };
+      } else {
+        tr.style.cursor = "default";
+      }
 
 
       tbody.appendChild(
@@ -8309,14 +8945,20 @@ Belegübersicht KGV Neuenhof
 </h1>
 
 
+${
+  hasAnyRole_()
+    ? `
 <a
   class="button save-button"
   style="margin-bottom:20px"
   href="${CONFIG.WEBAPP_URL}?neu=1"
-  target="_blank"
+  target="_top"
 >
 + Neuer Vorgang
 </a>
+`
+    : ""
+}
 
 
 <div class="search">
@@ -8428,9 +9070,13 @@ style="cursor:pointer"
 Status
 </th>
 
-<th>
+${
+  hasAnyRole_()
+    ? `<th>
 Aktion
-</th>
+</th>`
+    : ""
+}
 
 </tr>
 
@@ -8464,10 +9110,12 @@ Aktion
 
 
 function getOverviewData() {
-  ensureAllInternalIds();
+  ensureAllInternalIds_();
+
+  const canOpen = hasAnyRole_();
 
   const sheet =
-    getSheet();
+    getSheet_();
 
   const lastRow =
     sheet.getLastRow();
@@ -8515,7 +9163,7 @@ function getOverviewData() {
             ),
 
           internalId:
-            String(
+            !canOpen ? "" : String(
               row[
                 COL.INTERNE_ID - 1
               ] || ""
@@ -8598,6 +9246,13 @@ function getOverviewData() {
               : "",
 
           // nur für die Suche, keine eigene Spalte
+          notizen:
+            !canOpen ? "" : String(
+              row[
+                COL.NOTIZEN - 1
+              ] || ""
+            ),
+
           mtvBuchungsnummer:
             String(
               row[
@@ -8629,7 +9284,7 @@ function getOverviewData() {
  ************************************************************/
 
 
-function createChairmanOverviewPage() {
+function createChairmanOverviewPage_() {
 
   return `
 
@@ -8713,7 +9368,7 @@ function load() {
                 item.belegId
               ) +
               "&rolle=vorsitzender' " +
-              "target='_blank'>" +
+              "target='_top'>" +
               "📄 Öffnen" +
               "</a>";
 
@@ -8789,7 +9444,7 @@ Wird geladen...
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1"
-  target="_blank"
+  target="_top"
 >
 ← Belegübersicht
 </a>
@@ -8807,8 +9462,10 @@ Wird geladen...
 
 function getChairmanOverviewData() {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const lastRow =
     sheet.getLastRow();
@@ -8892,7 +9549,7 @@ function getChairmanOverviewData() {
  ************************************************************/
 
 
-function createPaymentOverview() {
+function createPaymentOverview_() {
 
   return `
 
@@ -8976,7 +9633,7 @@ function load() {
                 item.belegId
               ) +
               "&rolle=zweiter_kassierer' " +
-              "target='_blank'>" +
+              "target='_top'>" +
               "📄 Öffnen" +
               "</a>";
 
@@ -9053,7 +9710,7 @@ Wird geladen...
 <a
   class="button back-button"
   href="${CONFIG.WEBAPP_URL}?uebersicht=1"
-  target="_blank"
+  target="_top"
 >
 ← Belegübersicht
 </a>
@@ -9076,8 +9733,10 @@ Wird geladen...
 
 function getPaymentOverviewData() {
 
+  requireRole_([ROLE_KASSIERER, ROLE_VORSITZENDER, ROLE_ZWEITER_KASSIERER]);
+
   const sheet =
-    getSheet();
+    getSheet_();
 
   const lastRow =
     sheet.getLastRow();
@@ -9147,12 +9806,32 @@ function getPaymentOverviewData() {
 
 
 /************************************************************
+ * KEIN ZUGRIFF
+ ************************************************************/
+
+
+function noAccessPage_() {
+
+  return errorPage_(
+    "Die Belegprüfung ist dem 1. Kassierer, dem 1. Vorsitzenden " +
+    "und dem 2. Kassierer vorbehalten." +
+    (getActiveUserEmail()
+      ? " Angemeldet als: " + getActiveUserEmail() + "."
+      : " Bitte mit dem Vereinskonto anmelden."),
+    true
+  );
+
+}
+
+
+/************************************************************
  * FEHLERSEITE
  ************************************************************/
 
 
-function errorPage(
-  message
+function errorPage_(
+  message,
+  withOverviewLink
 ) {
 
   return `
@@ -9201,6 +9880,17 @@ Belegprüfung KGV Neuenhof
 ${htmlEscape(message)}
 </p>
 
+${
+  withOverviewLink
+    ? `<a href="${CONFIG.WEBAPP_URL}?uebersicht=1" target="_top"
+         style="display:block;text-align:center;padding:14px;margin-top:15px;
+                border-radius:8px;background:#444;color:white;
+                font-weight:bold;text-decoration:none">
+         ← Zur Belegübersicht
+       </a>`
+    : ""
+}
+
 </div>
 
 </body>
@@ -9210,13 +9900,3 @@ ${htmlEscape(message)}
 `;
 
 }
-
-/************************************************************
- * DIAGNOSE
- ************************************************************/
-function diagnoseBeleg(identifier) {
-  const byId=getRowData(identifier,false);
-  const byKey=getRowData(identifier,true);
-  return {identifier:String(identifier||""),byId:byId?{row:byId.rowNumber,belegId:byId.values[COL.BELEG_ID-1],internalId:byId.values[COL.INTERNE_ID-1],timestamp:String(byId.values[COL.ZEITSTEMPEL-1])}:null,byKey:byKey?{row:byKey.rowNumber,belegId:byKey.values[COL.BELEG_ID-1],internalId:byKey.values[COL.INTERNE_ID-1],timestamp:String(byKey.values[COL.ZEITSTEMPEL-1])}:null};
-}
-
